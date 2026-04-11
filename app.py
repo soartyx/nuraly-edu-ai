@@ -15,6 +15,7 @@ from moviepy.config import get_setting
 
 # Теперь клиент берет ключ из Secrets автоматически
 client = AsyncOpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+PK = st.secrets["PEXELS_API_KEY"]  # Добавь эту строку!
 
 
 # ── парсер ──────────────────────────────────────────────────────────
