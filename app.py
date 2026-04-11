@@ -416,13 +416,24 @@ class MediaGenerator:
             vids = r.json().get("videos", [])
             if not vids:
                 return None
+            # FIX 2: video_files can be an empty list — guard max() to avoid ValueError
+            video_files = vids[0].get("video_files", [])
+            if not video_files:
+                print(f"[pexels '{query}'] video_files list is empty")
+                return None
             best = max(
-                vids[0]["video_files"],
+                video_files,
                 key=lambda f: f.get("width", 0) * f.get("height", 0),
             )
             async with httpx.AsyncClient(timeout=90, follow_redirects=True) as h:
                 resp = await h.get(best["link"])
+            # FIX 3: write to absolute path (path is already absolute from generate_step)
             path.write_bytes(resp.content)
+            # FIX 2: verify the file is non-empty so MoviePy won't hit "first frame" error
+            if path.stat().st_size == 0:
+                print(f"[pexels '{query}'] downloaded file is 0 bytes")
+                path.unlink(missing_ok=True)
+                return None
             return path
         except Exception as e:
             print(f"[pexels '{query}'] {e}")
@@ -439,9 +450,16 @@ class MediaGenerator:
             res = await self._try_fetch(q, path)
             if res:
                 return res
-        raise RuntimeError(f"All video queries failed: {step['t']}")
+        # FIX 4: show a visible Streamlit warning when every Pexels query fails
+        title = step["t"]
+        st.warning(
+            f"⚠️ No videos found for slide '{title}' — skipping background video. "
+            "Check your PEXELS_API_KEY or try a different topic."
+        )
+        raise RuntimeError(f"All video queries failed for: {step['t']}")
 
     async def generate_step(self, step: dict, idx: int, tmp: Path) -> dict:
+        # FIX 3: tmp is already absolute (resolved in pipeline); make file paths explicit
         ap, vp = tmp / f"a_{idx}.mp3", tmp / f"v_{idx}.mp4"
         audio, video = await asyncio.gather(
             self.tts(step["n"], ap), self.fetch_video(step, vp)
@@ -611,7 +629,7 @@ class VideoAssembler:
 #  5. ПАЙПЛАЙН + ОЧИСТКА
 # ════════════════════════════════════════════════════════════════════
 async def pipeline(text: str, progress) -> tuple[Path, dict]:
-    tmp = Path(tempfile.mkdtemp())
+    tmp = Path(tempfile.mkdtemp()).resolve()  # FIX 3: absolute path — MoviePy needs it
     try:
         progress.progress(5, "🧠 Генерирую сценарий урока...")
         data = await StepParser().parse(text)
@@ -636,7 +654,8 @@ async def pipeline(text: str, progress) -> tuple[Path, dict]:
             segs.extend(results)
 
         progress.progress(78, "🎬 Монтирую видео...")
-        out = Path("output_lesson.mp4")
+        # FIX 3: resolve to absolute so MoviePy write_videofile never gets a bare filename
+        out = Path("output_lesson.mp4").resolve()
         VideoAssembler().assemble(segs, out)
         progress.progress(98, "🧹 Очищаю временные файлы...")
         return out, data
