@@ -10,6 +10,7 @@ import numpy as np
 # ════════════════════════════════════════════════════════════════════
 try:
     from moviepy.config import change_settings
+
     change_settings(
         {"IMAGEMAGICK_BINARY": os.environ.get("IMAGEMAGICK_BINARY", "convert")}
     )
@@ -111,6 +112,7 @@ def render_formula_image(
 ) -> Image.Image | None:
     try:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
@@ -121,8 +123,14 @@ def render_formula_image(
         ax.set_axis_off()
         ax.set_facecolor((0, 0, 0, 0))
         ax.text(
-            0.5, 0.5, f"${clean}$",
-            fontsize=80, color="white", ha="center", va="center", fontweight="bold",
+            0.5,
+            0.5,
+            f"${clean}$",
+            fontsize=80,
+            color="white",
+            ha="center",
+            va="center",
+            fontweight="bold",
             bbox=dict(
                 boxstyle="round,pad=0.5",
                 facecolor=(0, 0, 0, 0.6),
@@ -142,6 +150,7 @@ def render_scheme_image(
 ) -> Image.Image | None:
     try:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from matplotlib.patches import FancyBboxPatch
@@ -152,7 +161,9 @@ def render_scheme_image(
         ax.set_xlim(0, 10)
         ax.set_ylim(0, 6)
         ax.set_axis_off()
-        parts = [p.strip() for p in re.split(r"\s*->\s*|\s*→\s*", desc) if p.strip()][:5]
+        parts = [p.strip() for p in re.split(r"\s*->\s*|\s*→\s*", desc) if p.strip()][
+            :5
+        ]
         if not parts:
             parts = [desc[:40]]
         n = len(parts)
@@ -162,26 +173,42 @@ def render_scheme_image(
             c = colors[i % len(colors)]
             ax.add_patch(
                 FancyBboxPatch(
-                    (x - 1.05, 2.3), 2.1, 1.4,
+                    (x - 1.05, 2.3),
+                    2.1,
+                    1.4,
                     boxstyle="round,pad=0.12",
-                    facecolor=c + "33", edgecolor=c, linewidth=2.5,
+                    facecolor=c + "33",
+                    edgecolor=c,
+                    linewidth=2.5,
                 )
             )
             ax.text(
-                x, 3.0, part[:22],
-                ha="center", va="center", color="white",
-                fontsize=max(7, 14 - n * 2), fontweight="bold",
+                x,
+                3.0,
+                part[:22],
+                ha="center",
+                va="center",
+                color="white",
+                fontsize=max(7, 14 - n * 2),
+                fontweight="bold",
             )
             if i < n - 1:
                 ax.annotate(
                     "",
-                    xy=(xs[i + 1] - 1.05, 3.0), xytext=(x + 1.05, 3.0),
+                    xy=(xs[i + 1] - 1.05, 3.0),
+                    xytext=(x + 1.05, 3.0),
                     arrowprops=dict(arrowstyle="->", color="#48CAE4", lw=2.5),
                 )
         ax.text(
-            5, 5.3, title[:55],
-            ha="center", va="center", color="#48CAE4",
-            fontsize=20, fontweight="bold", alpha=0.95,
+            5,
+            5.3,
+            title[:55],
+            ha="center",
+            va="center",
+            color="#48CAE4",
+            fontsize=20,
+            fontweight="bold",
+            alpha=0.95,
         )
         return _save_fig(fig, w, h)
     except Exception as e:
@@ -194,6 +221,7 @@ def render_code_image(
 ) -> Image.Image | None:
     try:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from matplotlib.patches import FancyBboxPatch
@@ -206,27 +234,64 @@ def render_code_image(
         ax.set_axis_off()
         ax.add_patch(
             FancyBboxPatch(
-                (0.3, 0.4), 9.4, 4.8,
+                (0.3, 0.4),
+                9.4,
+                4.8,
                 boxstyle="round,pad=0.1",
                 facecolor=(0.05, 0.05, 0.15, 0.88),
-                edgecolor="#6C63FF", linewidth=2,
+                edgecolor="#6C63FF",
+                linewidth=2,
             )
         )
         ax.add_patch(
             FancyBboxPatch(
-                (0.3, 4.9), 9.4, 0.5,
+                (0.3, 4.9),
+                9.4,
+                0.5,
                 boxstyle="round,pad=0.05",
                 facecolor=(0.15, 0.1, 0.3, 0.95),
-                edgecolor="#6C63FF", linewidth=1.5,
+                edgecolor="#6C63FF",
+                linewidth=1.5,
             )
         )
         for xi, col in zip([0.6, 0.85, 1.1], ["#F72585", "#FFD60A", "#7BF1A8"]):
             ax.add_patch(plt.Circle((xi, 5.15), 0.08, color=col))
-        ax.text(5, 5.15, title[:50], ha="center", va="center", color="#aaa", fontsize=11, fontweight="bold")
+        ax.text(
+            5,
+            5.15,
+            title[:50],
+            ha="center",
+            va="center",
+            color="#aaa",
+            fontsize=11,
+            fontweight="bold",
+        )
         kw = {
-            "def", "class", "return", "import", "for", "if", "else", "elif",
-            "while", "in", "and", "or", "not", "True", "False", "None", "from",
-            "with", "lambda", "try", "except", "finally", "yield", "async", "await",
+            "def",
+            "class",
+            "return",
+            "import",
+            "for",
+            "if",
+            "else",
+            "elif",
+            "while",
+            "in",
+            "and",
+            "or",
+            "not",
+            "True",
+            "False",
+            "None",
+            "from",
+            "with",
+            "lambda",
+            "try",
+            "except",
+            "finally",
+            "yield",
+            "async",
+            "await",
         }
         lines = code.strip().split("\n")[:14]
         for li, line in enumerate(lines):
@@ -235,15 +300,27 @@ def render_code_image(
             x_cur = 0.5
             for word in words:
                 col = (
-                    "#F72585" if word.rstrip("(:") in kw else
-                    "#FFD60A" if word.startswith("#") else
-                    "#7BF1A8" if (word.startswith('"') or word.startswith("'")) else
-                    "#e2e8f0"
+                    "#F72585"
+                    if word.rstrip("(:") in kw
+                    else (
+                        "#FFD60A"
+                        if word.startswith("#")
+                        else (
+                            "#7BF1A8"
+                            if (word.startswith('"') or word.startswith("'"))
+                            else "#e2e8f0"
+                        )
+                    )
                 )
                 ax.text(
-                    x_cur, y, word + " ",
-                    ha="left", va="center", color=col,
-                    fontsize=9.5, fontfamily="monospace",
+                    x_cur,
+                    y,
+                    word + " ",
+                    ha="left",
+                    va="center",
+                    color=col,
+                    fontsize=9.5,
+                    fontfamily="monospace",
                 )
                 x_cur += len(word) * 0.095 + 0.095
                 if x_cur > 9.3:
@@ -257,6 +334,7 @@ def render_code_image(
 def render_chart_image(title: str, w: int = 1280, h: int = 720) -> Image.Image | None:
     try:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
@@ -273,9 +351,14 @@ def render_chart_image(title: str, w: int = 1280, h: int = 720) -> Image.Image |
         for spine in ax.spines.values():
             spine.set_edgecolor("#2a2a55")
         ax.text(
-            0.5, 0.92, title[:55],
-            transform=ax.transAxes, ha="center",
-            color="#48CAE4", fontsize=18, fontweight="bold",
+            0.5,
+            0.92,
+            title[:55],
+            transform=ax.transAxes,
+            ha="center",
+            color="#48CAE4",
+            fontsize=18,
+            fontweight="bold",
         )
         return _save_fig(fig, w, h)
     except Exception as e:
@@ -368,7 +451,7 @@ class MediaGenerator:
             if res:
                 return res
         # FIX 4: show a visible Streamlit warning when every Pexels query fails
-        title = step['t']
+        title = step["t"]
         st.warning(
             f"⚠️ No videos found for slide '{title}' — skipping background video. "
             "Check your PEXELS_API_KEY or try a different topic."
@@ -527,7 +610,7 @@ class VideoAssembler:
             audio_codec="aac",
             temp_audiofile="temp_a.m4a",
             remove_temp=True,
-            threads=1,       # FIX 5: threads=1 — prevents Railway OOM kills
+            threads=1,  # FIX 5: threads=1 — prevents Railway OOM kills
             logger=None,
         )
 
@@ -569,7 +652,7 @@ async def pipeline(text: str, progress) -> tuple[Path, dict]:
         segs = []
         batch_size = 5
         for b in range(0, n, batch_size):
-            batch = steps[b: b + batch_size]
+            batch = steps[b : b + batch_size]
             pct = 15 + int(60 * (b / n))
             progress.progress(
                 pct, f"⬇️ Загружаю шаги {b+1}–{min(b+batch_size,n)} / {n}..."
@@ -635,7 +718,9 @@ hr{border-color:#2a2a5544!important}
     unsafe_allow_html=True,
 )
 
-st.markdown("<div class='hero-title'>🎓 Nuraly AI Academy</div>", unsafe_allow_html=True)
+st.markdown(
+    "<div class='hero-title'>🎓 Nuraly AI Academy</div>", unsafe_allow_html=True
+)
 st.markdown(
     "<div class='hero-sub'>Введи тему — получи глубокий видеоурок (20+ слайдов) с квизом</div>",
     unsafe_allow_html=True,
