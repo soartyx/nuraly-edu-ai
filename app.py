@@ -4,30 +4,28 @@ from openai import AsyncOpenAI
 import streamlit as st
 import numpy as np
 
-# Фикс для старых версий Pillow
-# --- БЛОК ПОДКЛЮЧЕНИЯ КЛЮЧЕЙ (БЕЗОПАСНЫЙ) ---
-# Сначала проверяем системные переменные Railway (они самые надежные тут)
-api_key_val = os.environ.get("OPENAI_API_KEY")
-pexels_key_val = os.environ.get("PEXELS_API_KEY")
+# ════════════════════════════════════════════════════════════════════
+#  FIX 1: БЕЗОПАСНОЕ ПОЛУЧЕНИЕ КЛЮЧЕЙ (Railway + Streamlit Cloud)
+#  Не упадёт при отсутствии secrets.toml
+# ════════════════════════════════════════════════════════════════════
+api_key_val = os.environ.get("OPENAI_API_KEY") or (
+    st.secrets["OPENAI_API_KEY"] if "OPENAI_API_KEY" in st.secrets else None
+)
+pexels_key_val = os.environ.get("PEXELS_API_KEY") or (
+    st.secrets["PEXELS_API_KEY"] if "PEXELS_API_KEY" in st.secrets else None
+)
 
-# Если системные переменные пустые, пробуем Streamlit (на случай если запустишь там)
-if not api_key_val:
-    try:
-        api_key_val = st.secrets["OPENAI_API_KEY"]
-        pexels_key_val = st.secrets["PEXELS_API_KEY"]
-    except:
-        pass
-
-# Проверка: если ключей всё еще нет — выводим понятную ошибку
 if not api_key_val:
     st.error("Критическая ошибка: API ключи не найдены в системе Railway!")
 
-# Инициализация объектов
+# FIX 2: LANCZOS — единственное место, гарантируем совместимость с Pillow 10+
+# Если по каким-то причинам атрибут отсутствует, создаём алиас
+if not hasattr(PIL.Image, "LANCZOS"):
+    PIL.Image.LANCZOS = PIL.Image.BICUBIC  # крайний fallback для очень старых версий
+
 client = AsyncOpenAI(api_key=api_key_val)
 PK = pexels_key_val
 MIN_SLIDE_DUR = 18.0  # минимум секунд на слайд
-# --------------------------------------------
-# ------------------------------
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -103,7 +101,6 @@ def render_formula_image(
 ) -> PIL.Image.Image | None:
     try:
         import matplotlib
-
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
@@ -141,7 +138,6 @@ def render_scheme_image(
 ) -> PIL.Image.Image | None:
     try:
         import matplotlib
-
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from matplotlib.patches import FancyBboxPatch
@@ -212,7 +208,6 @@ def render_code_image(
 ) -> PIL.Image.Image | None:
     try:
         import matplotlib
-
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from matplotlib.patches import FancyBboxPatch
@@ -258,31 +253,9 @@ def render_code_image(
             fontweight="bold",
         )
         kw = {
-            "def",
-            "class",
-            "return",
-            "import",
-            "for",
-            "if",
-            "else",
-            "elif",
-            "while",
-            "in",
-            "and",
-            "or",
-            "not",
-            "True",
-            "False",
-            "None",
-            "from",
-            "with",
-            "lambda",
-            "try",
-            "except",
-            "finally",
-            "yield",
-            "async",
-            "await",
+            "def", "class", "return", "import", "for", "if", "else", "elif",
+            "while", "in", "and", "or", "not", "True", "False", "None", "from",
+            "with", "lambda", "try", "except", "finally", "yield", "async", "await",
         }
         lines = code.strip().split("\n")[:14]
         for li, line in enumerate(lines):
@@ -327,7 +300,6 @@ def render_chart_image(
 ) -> PIL.Image.Image | None:
     try:
         import matplotlib
-
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
@@ -484,19 +456,25 @@ class VideoAssembler:
 
         if tmp_dir is None:
             tmp_dir = Path(tempfile.mkdtemp())
+
         clips = []
+        # FIX 3: отдельный список для явного закрытия src-клипов после каждого сегмента
+        src_clips_to_close = []
+
         for i, seg in enumerate(segments):
-            # FIX 2 & 3: track all clips for explicit close, resize to 480p
             audio = AudioFileClip(str(seg["audio"]))
             speech_dur = audio.duration
             dur = max(speech_dur, MIN_SLIDE_DUR)
 
+            # FIX 3: открываем src и запоминаем для закрытия
             src = VideoFileClip(str(seg["video"]))
+            src_clips_to_close.append(src)
+
             vid = (
                 src.without_audio()
                 .subclip(0, min(speech_dur, src.duration))
                 .loop(duration=dur)
-                .resize(height=480)  # FIX 3: downscale to 480p to reduce RAM usage
+                .resize(height=480)
             )
             W, H = vid.w, vid.h
             layers = [vid]
@@ -504,9 +482,11 @@ class VideoAssembler:
             mid_img = pick_visual(seg, W, H)
             if mid_img:
                 try:
-                    # FIX 1: use LANCZOS instead of removed ANTIALIAS
+                    # FIX 2: PIL.Image.LANCZOS (Pillow 10+), ANTIALIAS удалён
                     mid_img = mid_img.resize((W, H), PIL.Image.LANCZOS)
                     arr = np.array(mid_img)
+                    # FIX 3: явно удаляем PIL-объект из памяти после конвертации
+                    del mid_img
                     ic = (
                         ImageClip(arr, ismask=False)
                         .set_duration(dur)
@@ -539,23 +519,26 @@ class VideoAssembler:
             comp = CompositeVideoClip(layers, size=(W, H))
 
             # тишина через wave-модуль (совместимо со всеми версиями moviepy)
+            sil_clip = None
             if dur > speech_dur + 0.05:
                 sil_path = self._make_silence(dur - speech_dur, tmp_dir, i)
                 sil_clip = AudioFileClip(str(sil_path))
                 full_audio = concatenate_audioclips([audio, sil_clip])
             else:
                 full_audio = audio
-                sil_clip = None
 
             clips.append(comp.set_audio(full_audio))
 
-            # FIX 2: explicitly close source clip to free RAM, then collect garbage
+            # FIX 3: закрываем src сразу после того, как нарезали нужный subclip —
+            # MoviePy уже скопировал данные, держать файл открытым не нужно
             try:
                 src.close()
             except Exception:
                 pass
+            # FIX 3: принудительная сборка мусора после каждого сегмента
             gc.collect()
 
+        # Финальная склейка и запись
         final = concatenate_videoclips(clips, method="compose")
         final.write_videofile(
             str(out),
@@ -568,7 +551,7 @@ class VideoAssembler:
             logger=None,
         )
 
-        # FIX 2: close all assembled clips after write to free memory
+        # FIX 3: закрываем все клипы после записи, чтобы освободить дескрипторы
         try:
             final.close()
         except Exception:
@@ -576,6 +559,11 @@ class VideoAssembler:
         for clip in clips:
             try:
                 clip.close()
+            except Exception:
+                pass
+        for src in src_clips_to_close:
+            try:
+                src.close()
             except Exception:
                 pass
         gc.collect()
@@ -621,12 +609,15 @@ async def pipeline(text: str, progress) -> tuple[Path, dict]:
         for f in Path(".").glob("temp_a*"):
             try:
                 f.unlink()
-            except:
+            except Exception:
                 pass
 
 
 # ════════════════════════════════════════════════════════════════════
 #  6. STREAMLIT UI
+#  FIX 4: порт НЕ задаётся в коде — Railway передаёт его через $PORT
+#          Streamlit читает его автоматически при запуске:
+#          CMD ["streamlit", "run", "app.py", "--server.port", "$PORT", ...]
 # ════════════════════════════════════════════════════════════════════
 st.set_page_config(page_title="Nuraly AI Academy", page_icon="🎓", layout="centered")
 
