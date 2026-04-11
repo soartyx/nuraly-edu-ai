@@ -6,32 +6,35 @@ import streamlit as st
 import numpy as np
 
 # ════════════════════════════════════════════════════════════════════
-#  ImageMagick policy fix для Railway (moviepy TextClip)
+#  ImageMagick policy fix for Railway (moviepy TextClip)
 # ════════════════════════════════════════════════════════════════════
 try:
     from moviepy.config import change_settings
-    change_settings(
-        {"IMAGEMAGICK_BINARY": os.environ.get("IMAGEMAGICK_BINARY", "convert")}
-    )
+    change_settings({"IMAGEMAGICK_BINARY": os.environ.get("IMAGEMAGICK_BINARY", "convert")})
 except Exception:
     pass
 
 # ════════════════════════════════════════════════════════════════════
-#  FIX 4: API keys via os.getenv (Railway Variables)
+#  API Keys via os.getenv (Railway Variables)
 # ════════════════════════════════════════════════════════════════════
 api_key_val = os.getenv("OPENAI_API_KEY") or (
-    st.secrets["OPENAI_API_KEY"] if "OPENAI_API_KEY" in st.secrets else None
+    st.secrets.get("OPENAI_API_KEY") if hasattr(st, "secrets") else None
 )
 pexels_key_val = os.getenv("PEXELS_API_KEY") or (
-    st.secrets["PEXELS_API_KEY"] if "PEXELS_API_KEY" in st.secrets else None
+    st.secrets.get("PEXELS_API_KEY") if hasattr(st, "secrets") else None
 )
 
 if not api_key_val:
-    st.error("Критическая ошибка: API ключи не найдены в системе Railway!")
+    st.error("Critical: OPENAI_API_KEY not found. Check Railway environment variables.")
+    st.stop()
 
-# FIX 1: Pillow compatibility — LANCZOS (Pillow 10+, ANTIALIAS removed)
+if not pexels_key_val:
+    st.error("Critical: PEXELS_API_KEY not found. Check Railway environment variables.")
+    st.stop()
+
+# Pillow compatibility — LANCZOS (Pillow 10+)
 if not hasattr(Image, "LANCZOS"):
-    Image.LANCZOS = Image.BICUBIC  # fallback for very old Pillow
+    Image.LANCZOS = Image.BICUBIC
 
 client = AsyncOpenAI(api_key=api_key_val)
 PK = pexels_key_val
@@ -39,7 +42,25 @@ MIN_SLIDE_DUR = 18.0
 
 
 # ════════════════════════════════════════════════════════════════════
-#  1. ПАРСЕР — глубокий сценарий
+#  REQUIREMENT 5: Clean /tmp at the start of each pipeline run
+# ════════════════════════════════════════════════════════════════════
+def clean_tmp():
+    """Remove stale temp files from previous runs to prevent MoviePy from
+    reading corrupted or zero-byte files left over from a crashed session."""
+    tmp_root = Path(tempfile.gettempdir())
+    for item in tmp_root.iterdir():
+        if item.is_dir() and item.name.startswith("tmp"):
+            shutil.rmtree(item, ignore_errors=True)
+    # Also remove any stale temp audio files in the working directory
+    for f in Path(".").glob("temp_a*"):
+        try:
+            f.unlink()
+        except Exception:
+            pass
+
+
+# ════════════════════════════════════════════════════════════════════
+#  1. PARSER
 # ════════════════════════════════════════════════════════════════════
 class StepParser:
     SYS = (
@@ -90,11 +111,10 @@ class StepParser:
 
 
 # ════════════════════════════════════════════════════════════════════
-#  2. ВИЗУАЛИЗАЦИИ
+#  2. VISUALIZATIONS
 # ════════════════════════════════════════════════════════════════════
 def _save_fig(fig, w, h) -> Image.Image | None:
     import matplotlib.pyplot as plt
-
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight", transparent=True, dpi=100)
     plt.close(fig)
@@ -106,52 +126,36 @@ def _save_fig(fig, w, h) -> Image.Image | None:
     return canvas
 
 
-def render_formula_image(
-    formula: str, w: int = 1280, h: int = 720
-) -> Image.Image | None:
+def render_formula_image(formula: str, w: int = 1280, h: int = 720) -> Image.Image | None:
     try:
-        import matplotlib
-        matplotlib.use("Agg")
+        import matplotlib; matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-
         clean = formula.strip().strip("$")
         fig = plt.figure(figsize=(w / 100, h / 100), dpi=100, facecolor="none")
         fig.patch.set_alpha(0)
         ax = fig.add_axes([0, 0, 1, 1])
         ax.set_axis_off()
         ax.set_facecolor((0, 0, 0, 0))
-        ax.text(
-            0.5, 0.5, f"${clean}$",
+        ax.text(0.5, 0.5, f"${clean}$",
             fontsize=80, color="white", ha="center", va="center", fontweight="bold",
-            bbox=dict(
-                boxstyle="round,pad=0.5",
-                facecolor=(0, 0, 0, 0.6),
-                edgecolor=(0.4, 0.8, 1, 0.95),
-                linewidth=3,
-            ),
-            transform=ax.transAxes,
-        )
+            bbox=dict(boxstyle="round,pad=0.5", facecolor=(0, 0, 0, 0.6),
+                      edgecolor=(0.4, 0.8, 1, 0.95), linewidth=3),
+            transform=ax.transAxes)
         return _save_fig(fig, w, h)
     except Exception as e:
         print(f"[formula] {e}")
         return None
 
 
-def render_scheme_image(
-    desc: str, title: str, w: int = 1280, h: int = 720
-) -> Image.Image | None:
+def render_scheme_image(desc: str, title: str, w: int = 1280, h: int = 720) -> Image.Image | None:
     try:
-        import matplotlib
-        matplotlib.use("Agg")
+        import matplotlib; matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from matplotlib.patches import FancyBboxPatch
-
         fig, ax = plt.subplots(figsize=(w / 100, h / 100), dpi=100, facecolor="none")
         fig.patch.set_alpha(0)
         ax.set_facecolor((0, 0, 0, 0))
-        ax.set_xlim(0, 10)
-        ax.set_ylim(0, 6)
-        ax.set_axis_off()
+        ax.set_xlim(0, 10); ax.set_ylim(0, 6); ax.set_axis_off()
         parts = [p.strip() for p in re.split(r"\s*->\s*|\s*→\s*", desc) if p.strip()][:5]
         if not parts:
             parts = [desc[:40]]
@@ -160,91 +164,52 @@ def render_scheme_image(
         colors = ["#6C63FF", "#48CAE4", "#F72585", "#4CC9F0", "#7BF1A8"]
         for i, (x, part) in enumerate(zip(xs, parts)):
             c = colors[i % len(colors)]
-            ax.add_patch(
-                FancyBboxPatch(
-                    (x - 1.05, 2.3), 2.1, 1.4,
-                    boxstyle="round,pad=0.12",
-                    facecolor=c + "33", edgecolor=c, linewidth=2.5,
-                )
-            )
-            ax.text(
-                x, 3.0, part[:22],
-                ha="center", va="center", color="white",
-                fontsize=max(7, 14 - n * 2), fontweight="bold",
-            )
+            ax.add_patch(FancyBboxPatch((x - 1.05, 2.3), 2.1, 1.4,
+                boxstyle="round,pad=0.12", facecolor=c + "33", edgecolor=c, linewidth=2.5))
+            ax.text(x, 3.0, part[:22], ha="center", va="center", color="white",
+                    fontsize=max(7, 14 - n * 2), fontweight="bold")
             if i < n - 1:
-                ax.annotate(
-                    "",
-                    xy=(xs[i + 1] - 1.05, 3.0), xytext=(x + 1.05, 3.0),
-                    arrowprops=dict(arrowstyle="->", color="#48CAE4", lw=2.5),
-                )
-        ax.text(
-            5, 5.3, title[:55],
-            ha="center", va="center", color="#48CAE4",
-            fontsize=20, fontweight="bold", alpha=0.95,
-        )
+                ax.annotate("", xy=(xs[i + 1] - 1.05, 3.0), xytext=(x + 1.05, 3.0),
+                    arrowprops=dict(arrowstyle="->", color="#48CAE4", lw=2.5))
+        ax.text(5, 5.3, title[:55], ha="center", va="center", color="#48CAE4",
+                fontsize=20, fontweight="bold", alpha=0.95)
         return _save_fig(fig, w, h)
     except Exception as e:
         print(f"[scheme] {e}")
         return None
 
 
-def render_code_image(
-    code: str, title: str, w: int = 1280, h: int = 720
-) -> Image.Image | None:
+def render_code_image(code: str, title: str, w: int = 1280, h: int = 720) -> Image.Image | None:
     try:
-        import matplotlib
-        matplotlib.use("Agg")
+        import matplotlib; matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from matplotlib.patches import FancyBboxPatch
-
         fig, ax = plt.subplots(figsize=(w / 100, h / 100), dpi=100, facecolor="none")
         fig.patch.set_alpha(0)
         ax.set_facecolor((0, 0, 0, 0))
-        ax.set_xlim(0, 10)
-        ax.set_ylim(0, 6)
-        ax.set_axis_off()
-        ax.add_patch(
-            FancyBboxPatch(
-                (0.3, 0.4), 9.4, 4.8,
-                boxstyle="round,pad=0.1",
-                facecolor=(0.05, 0.05, 0.15, 0.88),
-                edgecolor="#6C63FF", linewidth=2,
-            )
-        )
-        ax.add_patch(
-            FancyBboxPatch(
-                (0.3, 4.9), 9.4, 0.5,
-                boxstyle="round,pad=0.05",
-                facecolor=(0.15, 0.1, 0.3, 0.95),
-                edgecolor="#6C63FF", linewidth=1.5,
-            )
-        )
+        ax.set_xlim(0, 10); ax.set_ylim(0, 6); ax.set_axis_off()
+        ax.add_patch(FancyBboxPatch((0.3, 0.4), 9.4, 4.8, boxstyle="round,pad=0.1",
+            facecolor=(0.05, 0.05, 0.15, 0.88), edgecolor="#6C63FF", linewidth=2))
+        ax.add_patch(FancyBboxPatch((0.3, 4.9), 9.4, 0.5, boxstyle="round,pad=0.05",
+            facecolor=(0.15, 0.1, 0.3, 0.95), edgecolor="#6C63FF", linewidth=1.5))
         for xi, col in zip([0.6, 0.85, 1.1], ["#F72585", "#FFD60A", "#7BF1A8"]):
             ax.add_patch(plt.Circle((xi, 5.15), 0.08, color=col))
         ax.text(5, 5.15, title[:50], ha="center", va="center", color="#aaa", fontsize=11, fontweight="bold")
-        kw = {
-            "def", "class", "return", "import", "for", "if", "else", "elif",
-            "while", "in", "and", "or", "not", "True", "False", "None", "from",
-            "with", "lambda", "try", "except", "finally", "yield", "async", "await",
-        }
+        kw = {"def","class","return","import","for","if","else","elif","while","in","and",
+              "or","not","True","False","None","from","with","lambda","try","except",
+              "finally","yield","async","await"}
         lines = code.strip().split("\n")[:14]
         for li, line in enumerate(lines):
             y = 4.6 - li * 0.32
             words = line.split(" ")
             x_cur = 0.5
             for word in words:
-                col = (
-                    "#F72585" if word.rstrip("(:") in kw else
-                    "#FFD60A" if word.startswith("#") else
-                    "#7BF1A8" if (word.startswith('"') or word.startswith("'")) else
-                    "#e2e8f0"
-                )
-                ax.text(
-                    x_cur, y, word + " ",
-                    ha="left", va="center", color=col,
-                    fontsize=9.5, fontfamily="monospace",
-                )
+                col = ("#F72585" if word.rstrip("(:") in kw else
+                       "#FFD60A" if word.startswith("#") else
+                       "#7BF1A8" if (word.startswith('"') or word.startswith("'")) else
+                       "#e2e8f0")
+                ax.text(x_cur, y, word + " ", ha="left", va="center", color=col,
+                        fontsize=9.5, fontfamily="monospace")
                 x_cur += len(word) * 0.095 + 0.095
                 if x_cur > 9.3:
                     break
@@ -256,10 +221,8 @@ def render_code_image(
 
 def render_chart_image(title: str, w: int = 1280, h: int = 720) -> Image.Image | None:
     try:
-        import matplotlib
-        matplotlib.use("Agg")
+        import matplotlib; matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-
         fig, ax = plt.subplots(figsize=(w / 100, h / 100), dpi=100, facecolor="none")
         fig.patch.set_alpha(0)
         ax.set_facecolor((0, 0, 0, 0))
@@ -272,11 +235,8 @@ def render_chart_image(title: str, w: int = 1280, h: int = 720) -> Image.Image |
         ax.tick_params(colors="#555")
         for spine in ax.spines.values():
             spine.set_edgecolor("#2a2a55")
-        ax.text(
-            0.5, 0.92, title[:55],
-            transform=ax.transAxes, ha="center",
-            color="#48CAE4", fontsize=18, fontweight="bold",
-        )
+        ax.text(0.5, 0.92, title[:55], transform=ax.transAxes, ha="center",
+                color="#48CAE4", fontsize=18, fontweight="bold")
         return _save_fig(fig, w, h)
     except Exception as e:
         print(f"[chart] {e}")
@@ -304,11 +264,11 @@ def pick_visual(seg: dict, W: int, H: int) -> Image.Image | None:
 
 
 # ════════════════════════════════════════════════════════════════════
-#  3. МЕДИА
+#  3. MEDIA GENERATOR
 # ════════════════════════════════════════════════════════════════════
 class MediaGenerator:
     PEXELS_URL = "https://api.pexels.com/videos/search"
-    FALLBACK = [
+    FALLBACK_QUERIES = [
         "abstract motion graphics 4k",
         "dark particles flow loop",
         "minimalist geometry wave",
@@ -322,64 +282,94 @@ class MediaGenerator:
         return path
 
     async def _try_fetch(self, query: str, path: Path) -> Path | None:
+        # REQUIREMENT 4: Guard against empty query strings
+        if not query or not query.strip():
+            print("[pexels] Skipping empty query")
+            return None
+
         try:
             async with httpx.AsyncClient(timeout=30) as h:
                 r = await h.get(
                     self.PEXELS_URL,
                     headers={"Authorization": PK},
-                    params={"query": query, "per_page": 5, "orientation": "landscape"},
+                    params={"query": query.strip(), "per_page": 5, "orientation": "landscape"},
                 )
             r.raise_for_status()
-            vids = r.json().get("videos", [])
-            if not vids:
+
+            videos = r.json().get("videos", [])
+
+            # REQUIREMENT 1: Data validation — log and bail if no videos returned
+            st.write(f"🔍 Query `{query}` → found **{len(videos)}** videos")
+            if len(videos) == 0:
+                print(f"[pexels '{query}'] 0 results returned by API")
                 return None
-            # FIX 2: video_files can be an empty list — guard max() to avoid ValueError
-            video_files = vids[0].get("video_files", [])
-            if not video_files:
+
+            video_files = videos[0].get("video_files", [])
+
+            # REQUIREMENT 1: Also validate video_files list before max()
+            st.write(f"   └ First result has **{len(video_files)}** file variants")
+            if len(video_files) == 0:
                 print(f"[pexels '{query}'] video_files list is empty")
                 return None
+
+            # REQUIREMENT 2: Safe max() with default=None — PREVENTS the crash
             best = max(
                 video_files,
                 key=lambda f: f.get("width", 0) * f.get("height", 0),
+                default=None,
             )
+            if best is None or not best.get("link"):
+                print(f"[pexels '{query}'] Could not determine best file variant")
+                return None
+
             async with httpx.AsyncClient(timeout=90, follow_redirects=True) as h:
                 resp = await h.get(best["link"])
-            # FIX 3: write to absolute path (path is already absolute from generate_step)
+
             path.write_bytes(resp.content)
-            # FIX 2: verify the file is non-empty so MoviePy won't hit "first frame" error
-            if path.stat().st_size == 0:
-                print(f"[pexels '{query}'] downloaded file is 0 bytes")
+
+            # REQUIREMENT 3: Verify file is non-empty after download
+            if not path.exists() or path.stat().st_size == 0:
+                print(f"[pexels '{query}'] Downloaded file is 0 bytes or missing: {path}")
                 path.unlink(missing_ok=True)
                 return None
+
+            print(f"[pexels '{query}'] OK — {path.stat().st_size // 1024} KB saved to {path}")
             return path
+
         except Exception as e:
-            print(f"[pexels '{query}'] {e}")
+            print(f"[pexels '{query}'] Exception: {e}")
             return None
 
     async def fetch_video(self, step: dict, path: Path) -> Path:
         kw = step.get("kw", [])
-        queries = [
-            step["k"] + " minimalist 4k background",
-            " ".join(kw[:3]) + " abstract",
-            step["k"],
-        ] + self.FALLBACK
+        primary_key = step.get("k", "").strip()
+
+        # Build query list — skip any blank strings
+        queries = [q for q in [
+            f"{primary_key} minimalist 4k background" if primary_key else "",
+            " ".join(kw[:3]) + " abstract" if kw else "",
+            primary_key,
+        ] + self.FALLBACK_QUERIES if q.strip()]
+
         for q in queries:
-            res = await self._try_fetch(q, path)
-            if res:
-                return res
-        # FIX 4: show a visible Streamlit warning when every Pexels query fails
-        title = step['t']
-        st.warning(
-            f"⚠️ No videos found for slide '{title}' — skipping background video. "
-            "Check your PEXELS_API_KEY or try a different topic."
+            result = await self._try_fetch(q, path)
+            if result is not None:
+                return result
+
+        # All queries exhausted
+        title = step.get("t", "unknown")
+        st.error(
+            f"❌ No usable video found for slide **'{title}'** after trying "
+            f"{len(queries)} queries. Check PEXELS_API_KEY and topic keywords."
         )
-        raise RuntimeError(f"All video queries failed for: {step['t']}")
+        raise RuntimeError(f"All video queries failed for step: {title}")
 
     async def generate_step(self, step: dict, idx: int, tmp: Path) -> dict:
-        # FIX 3: tmp is already absolute (resolved in pipeline); make file paths explicit
-        ap, vp = tmp / f"a_{idx}.mp3", tmp / f"v_{idx}.mp4"
+        ap = tmp / f"a_{idx}.mp3"
+        vp = tmp / f"v_{idx}.mp4"
         audio, video = await asyncio.gather(
-            self.tts(step["n"], ap), self.fetch_video(step, vp)
+            self.tts(step["n"], ap),
+            self.fetch_video(step, vp),
         )
         return {
             "title": step["t"],
@@ -393,14 +383,14 @@ class MediaGenerator:
 
 
 # ════════════════════════════════════════════════════════════════════
-#  4. МОНТАЖ  (MIN_SLIDE_DUR сек минимум на слайд)
+#  4. VIDEO ASSEMBLER
 # ════════════════════════════════════════════════════════════════════
 class VideoAssembler:
+
     @staticmethod
     def _make_silence(duration: float, tmp_dir: Path, idx: int) -> Path:
-        """WAV silence via stdlib wave module — no AudioArrayClip needed."""
+        """WAV silence via stdlib — no AudioArrayClip needed."""
         import wave, struct
-
         sr = 44100
         n_frames = int(sr * duration)
         p = tmp_dir / f"silence_{idx}.wav"
@@ -408,20 +398,13 @@ class VideoAssembler:
             wf.setnchannels(2)
             wf.setsampwidth(2)
             wf.setframerate(sr)
-            wf.writeframes(
-                struct.pack("<" + "h" * n_frames * 2, *([0] * (n_frames * 2)))
-            )
+            wf.writeframes(struct.pack("<" + "h" * n_frames * 2, *([0] * (n_frames * 2))))
         return p
 
     def assemble(self, segments: list[dict], out: Path, tmp_dir: Path = None) -> Path:
         from moviepy.editor import (
-            VideoFileClip,
-            AudioFileClip,
-            concatenate_videoclips,
-            concatenate_audioclips,
-            CompositeVideoClip,
-            TextClip,
-            ImageClip,
+            VideoFileClip, AudioFileClip, concatenate_videoclips,
+            concatenate_audioclips, CompositeVideoClip, TextClip, ImageClip,
         )
 
         if tmp_dir is None:
@@ -431,25 +414,27 @@ class VideoAssembler:
         src_clips_to_close = []
 
         for i, seg in enumerate(segments):
-            # FIX 2: wrap each segment in try-except to survive "first frame" errors
+            src = None
             try:
-                audio = AudioFileClip(str(seg["audio"]))
+                # REQUIREMENT 3: Validate audio file before use
+                audio_path = Path(seg["audio"])
+                if not audio_path.exists() or audio_path.stat().st_size == 0:
+                    st.warning(f"Audio file {audio_path} is empty or missing. Skipping segment '{seg['title']}'.")
+                    continue
+
+                # REQUIREMENT 3: Validate video file before passing to MoviePy
+                video_path = Path(seg["video"])
+                if not video_path.exists() or video_path.stat().st_size == 0:
+                    st.warning(f"Video file {video_path} is empty or missing. Skipping segment '{seg['title']}'.")
+                    continue
+
+                audio = AudioFileClip(str(audio_path))
                 speech_dur = audio.duration
                 dur = max(speech_dur, MIN_SLIDE_DUR)
 
-                # FIX 3: verify the video file exists and is non-empty BEFORE
-                # passing it to VideoFileClip — a missing or 0-byte file is the
-                # #1 cause of MoviePy's "failed to read the first frame" on Railway
-                video_path = Path(seg["video"])
-                if not video_path.exists() or video_path.stat().st_size == 0:
-                    raise RuntimeError(
-                        f"Video file missing or empty for '{seg['title']}': "
-                        f"{video_path}"
-                    )
                 src = VideoFileClip(str(video_path))
                 src_clips_to_close.append(src)
 
-                # FIX 5: resize to height=480 to stay within RAM limits
                 vid = (
                     src.without_audio()
                     .subclip(0, min(speech_dur, src.duration))
@@ -462,10 +447,9 @@ class VideoAssembler:
                 mid_img = pick_visual(seg, W, H)
                 if mid_img:
                     try:
-                        # FIX 1: Image.LANCZOS (not PIL.Image.ANTIALIAS)
                         mid_img = mid_img.resize((W, H), Image.LANCZOS)
                         arr = np.array(mid_img)
-                        del mid_img  # free PIL object immediately after conversion
+                        del mid_img
                         ic = (
                             ImageClip(arr, ismask=False)
                             .set_duration(dur)
@@ -474,30 +458,23 @@ class VideoAssembler:
                         )
                         layers.append(ic)
                     except Exception as e:
-                        print(f"[warn] viz: {e}")
+                        print(f"[warn] viz overlay: {e}")
 
                 try:
                     tc = (
-                        TextClip(
-                            seg["title"],
-                            fontsize=44,
-                            color="white",
-                            font="Arial-Bold",
-                            method="caption",
-                            size=(int(W * 0.88), None),
-                            stroke_color="black",
-                            stroke_width=2,
-                        )
+                        TextClip(seg["title"], fontsize=44, color="white",
+                                 font="Arial-Bold", method="caption",
+                                 size=(int(W * 0.88), None),
+                                 stroke_color="black", stroke_width=2)
                         .set_position(("center", 0.84), relative=True)
                         .set_duration(dur)
                     )
                     layers.append(tc)
                 except Exception as e:
-                    print(f"[warn] title: {e}")
+                    print(f"[warn] title text: {e}")
 
                 comp = CompositeVideoClip(layers, size=(W, H))
 
-                # silence via stdlib wave (compatible with all moviepy versions)
                 if dur > speech_dur + 0.05:
                     sil_path = self._make_silence(dur - speech_dur, tmp_dir, i)
                     sil_clip = AudioFileClip(str(sil_path))
@@ -508,17 +485,19 @@ class VideoAssembler:
                 clips.append(comp.set_audio(full_audio))
 
             except Exception as e:
-                # FIX 2: log and skip bad segments rather than crashing the whole render
-                print(f"[error] segment {i} skipped: {e}")
+                print(f"[error] Segment {i} ('{seg.get('title', '?')}') skipped: {e}")
+                st.warning(f"⚠️ Segment {i+1} skipped due to error: {e}")
             finally:
-                # FIX 2: always close src and collect garbage after each segment
-                try:
-                    src.close()
-                except Exception:
-                    pass
-                gc.collect()  # FIX 2: release memory after every video segment
+                if src is not None:
+                    try:
+                        src.close()
+                    except Exception:
+                        pass
+                gc.collect()
 
-        # Final concat and render
+        if not clips:
+            raise RuntimeError("No valid segments could be assembled. Check errors above.")
+
         final = concatenate_videoclips(clips, method="compose")
         final.write_videofile(
             str(out),
@@ -527,11 +506,10 @@ class VideoAssembler:
             audio_codec="aac",
             temp_audiofile="temp_a.m4a",
             remove_temp=True,
-            threads=1,       # FIX 5: threads=1 — prevents Railway OOM kills
+            threads=1,
             logger=None,
         )
 
-        # FIX 2: close all clips after write to release file handles
         try:
             final.close()
         except Exception:
@@ -547,43 +525,45 @@ class VideoAssembler:
             except Exception:
                 pass
         gc.collect()
-
         return out
 
 
 # ════════════════════════════════════════════════════════════════════
-#  5. ПАЙПЛАЙН + ОЧИСТКА
+#  5. PIPELINE
 # ════════════════════════════════════════════════════════════════════
 async def pipeline(text: str, progress) -> tuple[Path, dict]:
-    tmp = Path(tempfile.mkdtemp()).resolve()  # FIX 3: absolute path — MoviePy needs it
+    # REQUIREMENT 5: Clean tmp at the start of every run
+    clean_tmp()
+
+    tmp = Path(tempfile.mkdtemp()).resolve()
     try:
-        progress.progress(5, "🧠 Генерирую сценарий урока...")
+        progress.progress(5, "🧠 Generating lesson script...")
         data = await StepParser().parse(text)
-        steps = data["video_steps"]
+        steps = data.get("video_steps", [])
         n = len(steps)
 
-        progress.progress(15, f"📦 Сценарий готов: {n} шагов. Загружаю медиа...")
+        if n == 0:
+            st.error("Script generation returned 0 steps. Try rephrasing your topic.")
+            st.stop()
+
+        progress.progress(15, f"📦 Script ready: {n} steps. Fetching media...")
         mg = MediaGenerator()
 
-        # batches of 5 — avoid overloading the network
         segs = []
         batch_size = 5
         for b in range(0, n, batch_size):
             batch = steps[b: b + batch_size]
             pct = 15 + int(60 * (b / n))
-            progress.progress(
-                pct, f"⬇️ Загружаю шаги {b+1}–{min(b+batch_size,n)} / {n}..."
-            )
+            progress.progress(pct, f"⬇️ Fetching steps {b+1}–{min(b+batch_size, n)} / {n}...")
             results = await asyncio.gather(
                 *[mg.generate_step(s, b + i, tmp) for i, s in enumerate(batch)]
             )
             segs.extend(results)
 
-        progress.progress(78, "🎬 Монтирую видео...")
-        # FIX 3: resolve to absolute so MoviePy write_videofile never gets a bare filename
+        progress.progress(78, "🎬 Assembling video...")
         out = Path("output_lesson.mp4").resolve()
-        VideoAssembler().assemble(segs, out)
-        progress.progress(98, "🧹 Очищаю временные файлы...")
+        VideoAssembler().assemble(segs, out, tmp_dir=tmp)
+        progress.progress(98, "🧹 Cleaning up...")
         return out, data
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -596,13 +576,10 @@ async def pipeline(text: str, progress) -> tuple[Path, dict]:
 
 # ════════════════════════════════════════════════════════════════════
 #  6. STREAMLIT UI
-#  Port is NOT set in code — Railway passes it via $PORT:
-#  CMD ["streamlit", "run", "app.py", "--server.port", "$PORT", "--server.address", "0.0.0.0"]
 # ════════════════════════════════════════════════════════════════════
 st.set_page_config(page_title="Nuraly AI Academy", page_icon="🎓", layout="centered")
 
-st.markdown(
-    """
+st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=DM+Sans:wght@400;500&display=swap');
 html,body,[class*="css"]{font-family:'DM Sans',sans-serif}
@@ -631,13 +608,11 @@ hr{border-color:#2a2a5544!important}
 ::-webkit-scrollbar{width:6px}
 ::-webkit-scrollbar-thumb{background:#6C63FF44;border-radius:9px}
 </style>
-""",
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
 st.markdown("<div class='hero-title'>🎓 Nuraly AI Academy</div>", unsafe_allow_html=True)
 st.markdown(
-    "<div class='hero-sub'>Введи тему — получи глубокий видеоурок (20+ слайдов) с квизом</div>",
+    "<div class='hero-sub'>Enter a topic — get a deep video lesson (20+ slides) with quiz</div>",
     unsafe_allow_html=True,
 )
 st.divider()
@@ -646,61 +621,60 @@ for k, v in [("data", None), ("video", None), ("checked", {})]:
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ── Ввод ─────────────────────────────────────────────────────────────
+# ── Input ─────────────────────────────────────────────────────────
 st.markdown("<div class='card'>", unsafe_allow_html=True)
-st.markdown("<span class='pill'>📚 Новый урок</span>", unsafe_allow_html=True)
+st.markdown("<span class='pill'>📚 New Lesson</span>", unsafe_allow_html=True)
 topic = st.text_area(
-    "Тема",
-    placeholder="Например: Алгоритмы сортировки в Python, Законы термодинамики...",
+    "Topic",
+    placeholder="E.g.: Sorting algorithms in Python, Laws of thermodynamics...",
     height=110,
     label_visibility="collapsed",
 )
-gen = st.button("🚀 Создать глубокий видеоурок")
+gen = st.button("🚀 Generate deep video lesson")
 st.markdown("</div>", unsafe_allow_html=True)
 
 if gen and topic.strip():
-    progress = st.progress(0, "Запускаю...")
+    progress = st.progress(0, "Starting...")
     try:
         vid_path, data = asyncio.run(pipeline(topic.strip(), progress))
-        progress.progress(100, "✅ Готово!")
+        progress.progress(100, "✅ Done!")
         st.session_state.data = data
         st.session_state.video = vid_path
         st.session_state.checked = {}
         n = len(data["video_steps"])
-        st.success(f"✅ Урок готов! {n} слайдов · ~{int(n*MIN_SLIDE_DUR/60)}+ минут")
-        # FIX 3: st.balloons() only AFTER video is fully saved and pipeline is closed
+        st.success(f"✅ Lesson ready! {n} slides · ~{int(n * MIN_SLIDE_DUR / 60)}+ minutes")
         st.balloons()
     except Exception as e:
         progress.empty()
-        st.error(f"Ошибка: {e}")
+        st.error(f"Error: {e}")
 
-# ── Видео ─────────────────────────────────────────────────────────────
+# ── Video player ───────────────────────────────────────────────────
 if st.session_state.video and Path(st.session_state.video).exists():
     data = st.session_state.data
     st.divider()
 
     st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.markdown("<span class='pill'>🎬 Видеоурок</span>", unsafe_allow_html=True)
+    st.markdown("<span class='pill'>🎬 Video Lesson</span>", unsafe_allow_html=True)
     st.video(str(st.session_state.video))
     st.markdown("</div>", unsafe_allow_html=True)
 
     formulas = [s.get("f") for s in data["video_steps"] if s.get("f")]
     if formulas:
-        with st.expander("📐 Все формулы урока", expanded=False):
+        with st.expander("📐 All lesson formulas", expanded=False):
             for f in formulas:
                 st.latex(f.strip().strip("$"))
 
     if data.get("sum"):
         st.markdown(
-            f"<div class='card'>💡 <b>Итог:</b> {data['sum']}</div>",
+            f"<div class='card'>💡 <b>Summary:</b> {data['sum']}</div>",
             unsafe_allow_html=True,
         )
 
-    # ── Квиз (6 вопросов) ────────────────────────────────────────────
+    # ── Quiz ──────────────────────────────────────────────────────
     st.divider()
     st.markdown(
         "<div style='font-family:Syne,sans-serif;font-size:1.5rem;"
-        "font-weight:800;color:#48CAE4;margin-bottom:1rem'>🧠 Квиз — проверь себя</div>",
+        "font-weight:800;color:#48CAE4;margin-bottom:1rem'>🧠 Quiz — test yourself</div>",
         unsafe_allow_html=True,
     )
     LETTERS = "ABCD"
@@ -708,10 +682,7 @@ if st.session_state.video and Path(st.session_state.video).exists():
 
     for i, q in enumerate(quiz):
         st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.markdown(
-            f"<span class='pill'>Вопрос {i+1} / {len(quiz)}</span>",
-            unsafe_allow_html=True,
-        )
+        st.markdown(f"<span class='pill'>Question {i+1} / {len(quiz)}</span>", unsafe_allow_html=True)
         st.markdown(f"**{q['q']}**")
         correct_idx = q["a"]
         options = q["o"]
@@ -721,14 +692,9 @@ if st.session_state.video and Path(st.session_state.video).exists():
             cols = st.columns(len(options))
             for idx, option in enumerate(options):
                 with cols[idx]:
-                    if st.button(
-                        f"{LETTERS[idx]}) {option}",
-                        key=f"q_{i}_{idx}",
-                        use_container_width=True,
-                    ):
-                        is_correct = idx == correct_idx
+                    if st.button(f"{LETTERS[idx]}) {option}", key=f"q_{i}_{idx}", use_container_width=True):
                         st.session_state.checked[i] = (
-                            is_correct,
+                            idx == correct_idx,
                             correct_idx,
                             options,
                             q.get("explanation", ""),
@@ -751,31 +717,27 @@ if st.session_state.video and Path(st.session_state.video).exists():
         if i in st.session_state.checked:
             ok, ci, _, expl = st.session_state.checked[i]
             if ok:
-                st.success("✅ Красавчик, правильно!")
+                st.success("✅ Correct!")
             else:
-                st.error(f"❌ Эх, мимо! Правильный: **{LETTERS[ci]}) {options[ci]}**")
+                st.error(f"❌ Wrong! Correct answer: **{LETTERS[ci]}) {options[ci]}**")
             if expl:
                 st.info(f"💡 {expl}")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # ── Финальный счёт ───────────────────────────────────────────────
+    # ── Final score ───────────────────────────────────────────────
     if len(st.session_state.checked) == len(quiz) and quiz:
         score = sum(1 for ok, *_ in st.session_state.checked.values() if ok)
         pct = int(score / len(quiz) * 100)
         st.divider()
-        st.markdown(
-            "<div class='card' style='text-align:center'>", unsafe_allow_html=True
-        )
-        st.markdown(f"### Результат: {score}/{len(quiz)} ({pct}%)")
+        st.markdown("<div class='card' style='text-align:center'>", unsafe_allow_html=True)
+        st.markdown(f"### Result: {score}/{len(quiz)} ({pct}%)")
         if pct == 100:
-            st.success("🏆 Идеально! Ты полностью освоил тему!")
-            # FIX 3: st.balloons() placed at the very end of the block,
-            # after video is fully written and all clips are closed
+            st.success("🏆 Perfect score! Topic fully mastered!")
             st.balloons()
         elif pct >= 70:
-            st.info("👍 Отличный результат! Материал усвоен хорошо.")
+            st.info("👍 Great result! Material well understood.")
         elif pct >= 50:
-            st.warning("📖 Неплохо, но стоит повторить слабые места.")
+            st.warning("📖 Not bad, but review the weak spots.")
         else:
-            st.error("🔁 Рекомендую пересмотреть урок целиком.")
+            st.error("🔁 Recommend rewatching the full lesson.")
         st.markdown("</div>", unsafe_allow_html=True)
