@@ -1,15 +1,25 @@
-import asyncio, json, tempfile, httpx, PIL.Image, io, re, shutil, math
+import asyncio, json, tempfile, httpx, PIL.Image, io, re, shutil, math, os
 from pathlib import Path
 from openai import AsyncOpenAI
 import streamlit as st
 import numpy as np
 
+# Фикс для старых версий Pillow
 if not hasattr(PIL.Image, "ANTIALIAS"):
     PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 
-client = AsyncOpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-PK = st.secrets["PEXELS_API_KEY"]
+# --- БЛОК ПОДКЛЮЧЕНИЯ КЛЮЧЕЙ ---
+# Пытаемся взять из Streamlit Secrets, если пусто — берем из Variables в Railway
+api_key_val = st.secrets.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+pexels_key_val = st.secrets.get("PEXELS_API_KEY") or os.environ.get("PEXELS_API_KEY")
+
+# Инициализация клиента OpenAI
+client = AsyncOpenAI(api_key=api_key_val)
+# Инициализация ключа Pexels
+PK = pexels_key_val
+
 MIN_SLIDE_DUR = 18.0  # минимум секунд на слайд
+# ------------------------------
 
 
 # ════════════════════════════════════════════════════════════════════
