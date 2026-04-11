@@ -5,20 +5,28 @@ import streamlit as st
 import numpy as np
 
 # Фикс для старых версий Pillow
-if not hasattr(PIL.Image, "ANTIALIAS"):
-    PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
+# --- БЛОК ПОДКЛЮЧЕНИЯ КЛЮЧЕЙ (БЕЗОПАСНЫЙ) ---
+# Сначала проверяем системные переменные Railway (они самые надежные тут)
+api_key_val = os.environ.get("OPENAI_API_KEY")
+pexels_key_val = os.environ.get("PEXELS_API_KEY")
 
-# --- БЛОК ПОДКЛЮЧЕНИЯ КЛЮЧЕЙ ---
-# Пытаемся взять из Streamlit Secrets, если пусто — берем из Variables в Railway
-api_key_val = st.secrets.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
-pexels_key_val = st.secrets.get("PEXELS_API_KEY") or os.environ.get("PEXELS_API_KEY")
+# Если системные переменные пустые, пробуем Streamlit (на случай если запустишь там)
+if not api_key_val:
+    try:
+        api_key_val = st.secrets["OPENAI_API_KEY"]
+        pexels_key_val = st.secrets["PEXELS_API_KEY"]
+    except:
+        pass
 
-# Инициализация клиента OpenAI
+# Проверка: если ключей всё еще нет — выводим понятную ошибку
+if not api_key_val:
+    st.error("Критическая ошибка: API ключи не найдены в системе Railway!")
+
+# Инициализация объектов
 client = AsyncOpenAI(api_key=api_key_val)
-# Инициализация ключа Pexels
 PK = pexels_key_val
-
 MIN_SLIDE_DUR = 18.0  # минимум секунд на слайд
+# --------------------------------------------
 # ------------------------------
 
 
