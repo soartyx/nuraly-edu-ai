@@ -290,27 +290,9 @@ class MediaGenerator:
         path.write_bytes(r.content)
         return path
 
-    @staticmethod
-    def _ffprobe_valid(path) -> bool:
-        """Use ffprobe to verify the file has a readable video stream.
-        This is the definitive check that prevents MoviePy's
-        'failed to read the first frame' crash on corrupted downloads."""
-        import subprocess
-        try:
-            result = subprocess.run(
-                ["ffprobe", "-v", "error",
-                 "-select_streams", "v:0",
-                 "-show_entries", "stream=codec_type",
-                 "-of", "default=noprint_wrappers=1:nokey=1",
-                 str(path)],
-                capture_output=True, text=True, timeout=15,
-            )
-            return "video" in result.stdout
-        except Exception as e:
-            print(f"[ffprobe] {e}")
-            return False
-
     async def _try_fetch(self, query: str, path) -> object:
+        """Fetch a video from Pexels for the given query.
+        No ffprobe — just take the first valid mp4 link and download it."""
         if not query or not query.strip():
             print("[pexels] Skipping empty query")
             return None
@@ -326,26 +308,33 @@ class MediaGenerator:
 
             videos = r.json().get("videos", [])
             print(f"[pexels '{query}'] {len(videos)} results")
+
+            # Task 3: safe max() — guard before accessing videos
             if not videos:
+                st.warning(f"No videos found for query: '{query}'")
                 return None
 
-            # Try each result until one passes ffprobe — not just the first
+            # Task 2: no ffprobe / no resolution checks — pick best mp4 from first result
+            # Try each video until we find one with a downloadable mp4 link
             for video in videos:
                 video_files = video.get("video_files", [])
                 if not video_files:
                     continue
 
-                # Prefer standard HD mp4 — 4K is slow and often DRM-locked
-                def _score(f):
-                    w, h = f.get("width", 0), f.get("height", 0)
-                    if w == 0 or h == 0:
-                        return -1
-                    fmt_bonus = 10000 if str(f.get("file_type", "")).lower() == "video/mp4" else 0
-                    diff = abs(w - 1280) + abs(h - 720)
-                    return fmt_bonus - diff
+                # Task 3: safe max() with default=None
+                mp4_files = [f for f in video_files
+                             if str(f.get("file_type", "")).lower() == "video/mp4"
+                             and f.get("link")]
+                if not mp4_files:
+                    # fallback: any file with a link
+                    mp4_files = [f for f in video_files if f.get("link")]
+                if not mp4_files:
+                    continue
 
-                best = sorted(video_files, key=_score, reverse=True)[0]
-                if not best.get("link"):
+                best = max(mp4_files,
+                           key=lambda f: f.get("width", 0) * f.get("height", 0),
+                           default=None)
+                if best is None or not best.get("link"):
                     continue
 
                 try:
@@ -357,22 +346,15 @@ class MediaGenerator:
                     path.unlink(missing_ok=True)
                     continue
 
-                # Must be >10 KB
                 if not path.exists() or path.stat().st_size < 10_000:
                     print(f"[pexels '{query}'] file too small, skipping")
-                    path.unlink(missing_ok=True)
-                    continue
-
-                # Must be readable by FFMPEG — prevents MoviePy first-frame crash
-                if not self._ffprobe_valid(path):
-                    print(f"[pexels '{query}'] ffprobe rejected, trying next video")
                     path.unlink(missing_ok=True)
                     continue
 
                 print(f"[pexels '{query}'] OK — {path.stat().st_size // 1024} KB")
                 return path
 
-            print(f"[pexels '{query}'] all {len(videos)} results failed validation")
+            print(f"[pexels '{query}'] no downloadable file found in {len(videos)} results")
             return None
 
         except Exception as e:
