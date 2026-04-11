@@ -541,30 +541,46 @@ if st.session_state.video and Path(st.session_state.video).exists():
             unsafe_allow_html=True,
         )
         st.markdown(f"**{q['q']}**")
-        opts = [f"{LETTERS[j]})  {o}" for j, o in enumerate(q["o"])]
-        chosen = st.radio(
-            "", opts, index=None, key=f"radio_{i}", label_visibility="collapsed"
-        )
-        st.session_state.answers[i] = chosen
+        correct_idx = q["a"]
+        options = q["o"]
+        already_answered = i in st.session_state.checked
 
-        col1, col2 = st.columns([1, 3])
-        with col1:
-            check = st.button("Проверить", key=f"check_{i}")
-        if check:
-            if not chosen:
-                st.warning("⚠️ Выбери вариант!")
-            else:
-                ui = opts.index(chosen)
-                ci = q["a"]
-                st.session_state.checked[i] = (ui == ci, ci, q["o"])
+        # кнопки-варианты (блокируются после ответа)
+        if not already_answered:
+            cols = st.columns(len(options))
+            for idx, option in enumerate(options):
+                with cols[idx]:
+                    label = f"{LETTERS[idx]}) {option}"
+                    if st.button(label, key=f"q_{i}_{idx}", use_container_width=True):
+                        is_correct = idx == correct_idx
+                        st.session_state.checked[i] = (is_correct, correct_idx, options)
+                        if is_correct:
+                            st.balloons()
+        else:
+            # после ответа — показываем варианты статично
+            cols = st.columns(len(options))
+            ok, ci, opts_saved = st.session_state.checked[i]
+            for idx, option in enumerate(opts_saved):
+                with cols[idx]:
+                    if idx == ci:
+                        st.success(f"{LETTERS[idx]}) {option}")
+                    else:
+                        st.markdown(
+                            f"<div style='padding:.45rem .6rem;border-radius:8px;"
+                            f"border:1px solid #2a2a55;color:#6b7280;font-size:.9rem'>"
+                            f"{LETTERS[idx]}) {option}</div>",
+                            unsafe_allow_html=True,
+                        )
 
+        # результат
         if i in st.session_state.checked:
-            ok, ci, options = st.session_state.checked[i]
+            ok, ci, _ = st.session_state.checked[i]
             if ok:
-                st.success("✅ Правильно!")
-                st.balloons()
+                st.success("✅ Красавчик, правильно!")
             else:
-                st.error(f"❌ Правильный ответ: **{LETTERS[ci]}) {options[ci]}**")
+                st.error(
+                    f"❌ Эх, мимо! Правильный ответ: **{LETTERS[ci]}) {options[ci]}**"
+                )
         st.markdown("</div>", unsafe_allow_html=True)
 
     # ── Финальный счёт ───────────────────────────────────────────────
