@@ -290,12 +290,34 @@ class MediaGenerator:
         path.write_bytes(r.content)
         return path
 
+    @staticmethod
+    def _is_valid_mp4(path) -> bool:
+        """Pure-Python MP4 container check — no ffprobe needed.
+        Reads the first 12 bytes and checks for the ftyp box signature.
+        This catches HTML error pages, redirects, and non-H.264 containers
+        BEFORE MoviePy tries to decode the first frame."""
+        try:
+            with open(path, "rb") as f:
+                header = f.read(12)
+            if len(header) < 8:
+                return False
+            # Bytes 4-7 must be b'ftyp' for a valid ISO Base Media file (MP4/MOV)
+            return header[4:8] == b'ftyp'
+        except Exception:
+            return False
+
     async def _try_fetch(self, query: str, path) -> object:
-        """Fetch a video from Pexels for the given query.
-        No ffprobe — just take the first valid mp4 link and download it."""
+        """Fetch a video from Pexels. Validates the MP4 container header
+        before returning, so MoviePy never sees a corrupted file."""
         if not query or not query.strip():
             print("[pexels] Skipping empty query")
             return None
+
+        DL_HEADERS = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/120.0.0.0 Safari/537.36"
+        }
 
         try:
             async with httpx.AsyncClient(timeout=30) as h:
@@ -308,73 +330,72 @@ class MediaGenerator:
 
             videos = r.json().get("videos", [])
             print(f"[pexels '{query}'] {len(videos)} results")
-
-            # Task 3: safe max() — guard before accessing videos
             if not videos:
-                st.warning(f"No videos found for query: '{query}'")
                 return None
 
-            # Task 2: no ffprobe / no resolution checks — pick best mp4 from first result
-            # Try each video until we find one with a downloadable mp4 link
             for video in videos:
                 video_files = video.get("video_files", [])
                 if not video_files:
                     continue
 
-                # Fix 5: Explicitly prefer hd > sd quality mp4 links.
-                # Pexels video_files each have a "quality" field ("hd","sd","uhd").
-                # We avoid "uhd" — it's often DRM-locked or too large for Railway RAM.
-                mp4_files = [f for f in video_files
-                             if str(f.get("file_type", "")).lower() == "video/mp4"
-                             and f.get("link")]
-                if not mp4_files:
-                    mp4_files = [f for f in video_files if f.get("link")]
-                if not mp4_files:
+                # Rank: prefer hd mp4 > sd mp4 > anything else
+                # Explicitly exclude uhd — too large for Railway RAM and often AV1/HEVC
+                def _rank(f):
+                    qt = str(f.get("file_type", "")).lower()
+                    qq = str(f.get("quality", "")).lower()
+                    if qt != "video/mp4":
+                        return -1
+                    return {"hd": 2, "sd": 1}.get(qq, 0)
+
+                candidates = [f for f in video_files
+                              if f.get("link") and _rank(f) > 0]
+                if not candidates:
+                    # last resort: any mp4 link including uhd
+                    candidates = [f for f in video_files
+                                  if f.get("link") and
+                                  str(f.get("file_type","")).lower() == "video/mp4"]
+                if not candidates:
                     continue
 
-                def _quality_rank(f):
-                    q = str(f.get("quality", "")).lower()
-                    # hd=2 (best), sd=1 (ok), uhd=0 (avoid — too large / DRM)
-                    return {"hd": 2, "sd": 1}.get(q, 0)
+                candidates.sort(key=_rank, reverse=True)
 
-                # Sort: quality rank first, then resolution as tiebreaker
-                mp4_files.sort(
-                    key=lambda f: (_quality_rank(f), f.get("width", 0) * f.get("height", 0)),
-                    reverse=True,
-                )
-                best = mp4_files[0] if mp4_files else None
-                if best is None or not best.get("link"):
-                    continue
-
-                try:
-                    # Fix 1: User-Agent prevents Pexels CDN from blocking the download
-                    dl_headers = {
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                      "Chrome/120.0.0.0 Safari/537.36"
-                    }
-                    async with httpx.AsyncClient(timeout=90, follow_redirects=True) as h:
-                        resp = await h.get(best["link"], headers=dl_headers)
-                    # Fix 2: Strict 100KB size check — anything smaller is not a real video
-                    if resp.status_code != 200 or len(resp.content) < 100_000:
-                        print(f"[pexels download] bad response: status={resp.status_code} size={len(resp.content)} bytes — skipping")
+                for candidate in candidates:
+                    link = candidate.get("link")
+                    if not link:
                         continue
-                    path.write_bytes(resp.content)
-                except Exception as e:
-                    print(f"[pexels download] {e}")
-                    path.unlink(missing_ok=True)
-                    continue
+                    try:
+                        async with httpx.AsyncClient(
+                            timeout=90, follow_redirects=True
+                        ) as h:
+                            resp = await h.get(link, headers=DL_HEADERS)
 
-                # Fix 1: 100KB minimum — anything smaller is not a real video
-                if not path.exists() or path.stat().st_size < 100_000:
-                    print(f"[pexels '{query}'] file too small ({path.stat().st_size if path.exists() else 0} bytes < 100KB), skipping")
-                    path.unlink(missing_ok=True)
-                    continue
+                        if resp.status_code != 200:
+                            print(f"[pexels] HTTP {resp.status_code} for {link[:60]}")
+                            continue
+                        if len(resp.content) < 100_000:
+                            print(f"[pexels] too small: {len(resp.content)} bytes")
+                            continue
 
-                print(f"[pexels '{query}'] OK — {path.stat().st_size // 1024} KB")
-                return path
+                        path.write_bytes(resp.content)
 
-            print(f"[pexels '{query}'] no downloadable file found in {len(videos)} results")
+                        # Pure-Python ftyp box check — catches HTML error pages
+                        # and non-standard containers before MoviePy sees the file
+                        if not self._is_valid_mp4(path):
+                            print(f"[pexels] ftyp check failed — not a valid MP4 container")
+                            path.unlink(missing_ok=True)
+                            continue
+
+                        size_kb = path.stat().st_size // 1024
+                        quality = candidate.get("quality", "?")
+                        print(f"[pexels '{query}'] ✓ {quality} {size_kb} KB — valid MP4")
+                        return path
+
+                    except Exception as e:
+                        print(f"[pexels candidate download] {e}")
+                        path.unlink(missing_ok=True)
+                        continue
+
+            print(f"[pexels '{query}'] all candidates failed")
             return None
 
         except Exception as e:
