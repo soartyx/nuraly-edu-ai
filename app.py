@@ -290,8 +290,27 @@ class MediaGenerator:
         path.write_bytes(r.content)
         return path
 
-    async def _try_fetch(self, query: str, path: Path) -> Path | None:
-        # REQUIREMENT 4: Guard against empty query strings
+    @staticmethod
+    def _ffprobe_valid(path) -> bool:
+        """Use ffprobe to verify the file has a readable video stream.
+        This is the definitive check that prevents MoviePy's
+        'failed to read the first frame' crash on corrupted downloads."""
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "error",
+                 "-select_streams", "v:0",
+                 "-show_entries", "stream=codec_type",
+                 "-of", "default=noprint_wrappers=1:nokey=1",
+                 str(path)],
+                capture_output=True, text=True, timeout=15,
+            )
+            return "video" in result.stdout
+        except Exception as e:
+            print(f"[ffprobe] {e}")
+            return False
+
+    async def _try_fetch(self, query: str, path) -> object:
         if not query or not query.strip():
             print("[pexels] Skipping empty query")
             return None
@@ -301,49 +320,60 @@ class MediaGenerator:
                 r = await h.get(
                     self.PEXELS_URL,
                     headers={"Authorization": PK},
-                    params={"query": query.strip(), "per_page": 5, "orientation": "landscape"},
+                    params={"query": query.strip(), "per_page": 8, "orientation": "landscape"},
                 )
             r.raise_for_status()
 
             videos = r.json().get("videos", [])
-
-            # REQUIREMENT 1: Data validation — log and bail if no videos returned
-            st.write(f"🔍 Query `{query}` → found **{len(videos)}** videos")
-            if len(videos) == 0:
-                print(f"[pexels '{query}'] 0 results returned by API")
+            print(f"[pexels '{query}'] {len(videos)} results")
+            if not videos:
                 return None
 
-            video_files = videos[0].get("video_files", [])
+            # Try each result until one passes ffprobe — not just the first
+            for video in videos:
+                video_files = video.get("video_files", [])
+                if not video_files:
+                    continue
 
-            # REQUIREMENT 1: Also validate video_files list before max()
-            st.write(f"   └ First result has **{len(video_files)}** file variants")
-            if len(video_files) == 0:
-                print(f"[pexels '{query}'] video_files list is empty")
-                return None
+                # Prefer standard HD mp4 — 4K is slow and often DRM-locked
+                def _score(f):
+                    w, h = f.get("width", 0), f.get("height", 0)
+                    if w == 0 or h == 0:
+                        return -1
+                    fmt_bonus = 10000 if str(f.get("file_type", "")).lower() == "video/mp4" else 0
+                    diff = abs(w - 1280) + abs(h - 720)
+                    return fmt_bonus - diff
 
-            # REQUIREMENT 2: Safe max() with default=None — PREVENTS the crash
-            best = max(
-                video_files,
-                key=lambda f: f.get("width", 0) * f.get("height", 0),
-                default=None,
-            )
-            if best is None or not best.get("link"):
-                print(f"[pexels '{query}'] Could not determine best file variant")
-                return None
+                best = sorted(video_files, key=_score, reverse=True)[0]
+                if not best.get("link"):
+                    continue
 
-            async with httpx.AsyncClient(timeout=90, follow_redirects=True) as h:
-                resp = await h.get(best["link"])
+                try:
+                    async with httpx.AsyncClient(timeout=90, follow_redirects=True) as h:
+                        resp = await h.get(best["link"])
+                    path.write_bytes(resp.content)
+                except Exception as e:
+                    print(f"[pexels download] {e}")
+                    path.unlink(missing_ok=True)
+                    continue
 
-            path.write_bytes(resp.content)
+                # Must be >10 KB
+                if not path.exists() or path.stat().st_size < 10_000:
+                    print(f"[pexels '{query}'] file too small, skipping")
+                    path.unlink(missing_ok=True)
+                    continue
 
-            # REQUIREMENT 3: Verify file is non-empty after download
-            if not path.exists() or path.stat().st_size == 0:
-                print(f"[pexels '{query}'] Downloaded file is 0 bytes or missing: {path}")
-                path.unlink(missing_ok=True)
-                return None
+                # Must be readable by FFMPEG — prevents MoviePy first-frame crash
+                if not self._ffprobe_valid(path):
+                    print(f"[pexels '{query}'] ffprobe rejected, trying next video")
+                    path.unlink(missing_ok=True)
+                    continue
 
-            print(f"[pexels '{query}'] OK — {path.stat().st_size // 1024} KB saved to {path}")
-            return path
+                print(f"[pexels '{query}'] OK — {path.stat().st_size // 1024} KB")
+                return path
+
+            print(f"[pexels '{query}'] all {len(videos)} results failed validation")
+            return None
 
         except Exception as e:
             print(f"[pexels '{query}'] Exception: {e}")
