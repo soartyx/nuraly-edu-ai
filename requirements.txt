@@ -1,5 +1,5 @@
 streamlit
 openai
 httpx
-moviepy
-Pillow
+moviepy==1.0.3
+pillow

@@ -6,7 +6,10 @@ import streamlit as st
 if not hasattr(PIL.Image, "ANTIALIAS"):
     PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 
+import streamlit as st
 import moviepy.editor as mp
+from PIL import Image
+
 from moviepy.config import get_setting
 
 
