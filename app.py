@@ -13,9 +13,8 @@ from PIL import Image
 from moviepy.config import get_setting
 
 
-OK = "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"
-PK = "ILkfVT0J6PKnvFMUUQJpLpJ0ZSRhzNDD0DKvC1LRWosjledrZd8KGpD1"
-client = AsyncOpenAI(api_key=OK)
+# Теперь клиент берет ключ из Secrets автоматически
+client = AsyncOpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 
 # ── парсер ──────────────────────────────────────────────────────────
