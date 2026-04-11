@@ -1,12 +1,12 @@
 import asyncio, json, tempfile, httpx, PIL.Image, io, re, shutil, math, os, gc
-from PIL import Image  # FIX 1: явный импорт для Image.LANCZOS
+from PIL import Image
 from pathlib import Path
 from openai import AsyncOpenAI
 import streamlit as st
 import numpy as np
 
 # ════════════════════════════════════════════════════════════════════
-#  FIX 2: ImageMagick policy fix для Railway (moviepy TextClip)
+#  ImageMagick policy fix для Railway (moviepy TextClip)
 # ════════════════════════════════════════════════════════════════════
 try:
     from moviepy.config import change_settings
@@ -18,7 +18,7 @@ except Exception:
     pass
 
 # ════════════════════════════════════════════════════════════════════
-#  FIX 4: БЕЗОПАСНОЕ ПОЛУЧЕНИЕ КЛЮЧЕЙ через os.getenv (Railway Variables)
+#  FIX 4: API keys via os.getenv (Railway Variables)
 # ════════════════════════════════════════════════════════════════════
 api_key_val = os.getenv("OPENAI_API_KEY") or (
     st.secrets["OPENAI_API_KEY"] if "OPENAI_API_KEY" in st.secrets else None
@@ -30,13 +30,13 @@ pexels_key_val = os.getenv("PEXELS_API_KEY") or (
 if not api_key_val:
     st.error("Критическая ошибка: API ключи не найдены в системе Railway!")
 
-# FIX 1: гарантируем наличие LANCZOS (Pillow 10+, ANTIALIAS удалён)
+# FIX 1: Pillow compatibility — LANCZOS (Pillow 10+, ANTIALIAS removed)
 if not hasattr(Image, "LANCZOS"):
-    Image.LANCZOS = Image.BICUBIC  # крайний fallback
+    Image.LANCZOS = Image.BICUBIC  # fallback for very old Pillow
 
 client = AsyncOpenAI(api_key=api_key_val)
 PK = pexels_key_val
-MIN_SLIDE_DUR = 18.0  # минимум секунд на слайд
+MIN_SLIDE_DUR = 18.0
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -463,7 +463,7 @@ class MediaGenerator:
 class VideoAssembler:
     @staticmethod
     def _make_silence(duration: float, tmp_dir: Path, idx: int) -> Path:
-        """WAV-тишина через стандартный модуль wave — без AudioArrayClip."""
+        """WAV silence via stdlib wave module — no AudioArrayClip needed."""
         import wave, struct
 
         sr = 44100
@@ -496,79 +496,85 @@ class VideoAssembler:
         src_clips_to_close = []
 
         for i, seg in enumerate(segments):
-            audio = AudioFileClip(str(seg["audio"]))
-            speech_dur = audio.duration
-            dur = max(speech_dur, MIN_SLIDE_DUR)
-
-            src = VideoFileClip(str(seg["video"]))
-            src_clips_to_close.append(src)
-
-            vid = (
-                src.without_audio()
-                .subclip(0, min(speech_dur, src.duration))
-                .loop(duration=dur)
-                .resize(height=480)
-            )
-            W, H = vid.w, vid.h
-            layers = [vid]
-
-            mid_img = pick_visual(seg, W, H)
-            if mid_img:
-                try:
-                    # FIX 1: Image.LANCZOS вместо PIL.Image.ANTIALIAS
-                    mid_img = mid_img.resize((W, H), Image.LANCZOS)
-                    arr = np.array(mid_img)
-                    del mid_img  # FIX 2: освобождаем PIL-объект сразу после конвертации
-                    ic = (
-                        ImageClip(arr, ismask=False)
-                        .set_duration(dur)
-                        .set_position("center")
-                        .set_opacity(0.9)
-                    )
-                    layers.append(ic)
-                except Exception as e:
-                    print(f"[warn] viz: {e}")
-
+            # FIX 2: wrap each segment in try-except to survive "first frame" errors
             try:
-                tc = (
-                    TextClip(
-                        seg["title"],
-                        fontsize=44,
-                        color="white",
-                        font="Arial-Bold",
-                        method="caption",
-                        size=(int(W * 0.88), None),
-                        stroke_color="black",
-                        stroke_width=2,
-                    )
-                    .set_position(("center", 0.84), relative=True)
-                    .set_duration(dur)
+                audio = AudioFileClip(str(seg["audio"]))
+                speech_dur = audio.duration
+                dur = max(speech_dur, MIN_SLIDE_DUR)
+
+                src = VideoFileClip(str(seg["video"]))
+                src_clips_to_close.append(src)
+
+                # FIX 5: resize to height=480 to stay within RAM limits
+                vid = (
+                    src.without_audio()
+                    .subclip(0, min(speech_dur, src.duration))
+                    .loop(duration=dur)
+                    .resize(height=480)
                 )
-                layers.append(tc)
+                W, H = vid.w, vid.h
+                layers = [vid]
+
+                mid_img = pick_visual(seg, W, H)
+                if mid_img:
+                    try:
+                        # FIX 1: Image.LANCZOS (not PIL.Image.ANTIALIAS)
+                        mid_img = mid_img.resize((W, H), Image.LANCZOS)
+                        arr = np.array(mid_img)
+                        del mid_img  # free PIL object immediately after conversion
+                        ic = (
+                            ImageClip(arr, ismask=False)
+                            .set_duration(dur)
+                            .set_position("center")
+                            .set_opacity(0.9)
+                        )
+                        layers.append(ic)
+                    except Exception as e:
+                        print(f"[warn] viz: {e}")
+
+                try:
+                    tc = (
+                        TextClip(
+                            seg["title"],
+                            fontsize=44,
+                            color="white",
+                            font="Arial-Bold",
+                            method="caption",
+                            size=(int(W * 0.88), None),
+                            stroke_color="black",
+                            stroke_width=2,
+                        )
+                        .set_position(("center", 0.84), relative=True)
+                        .set_duration(dur)
+                    )
+                    layers.append(tc)
+                except Exception as e:
+                    print(f"[warn] title: {e}")
+
+                comp = CompositeVideoClip(layers, size=(W, H))
+
+                # silence via stdlib wave (compatible with all moviepy versions)
+                if dur > speech_dur + 0.05:
+                    sil_path = self._make_silence(dur - speech_dur, tmp_dir, i)
+                    sil_clip = AudioFileClip(str(sil_path))
+                    full_audio = concatenate_audioclips([audio, sil_clip])
+                else:
+                    full_audio = audio
+
+                clips.append(comp.set_audio(full_audio))
+
             except Exception as e:
-                print(f"[warn] title: {e}")
+                # FIX 2: log and skip bad segments rather than crashing the whole render
+                print(f"[error] segment {i} skipped: {e}")
+            finally:
+                # FIX 2: always close src and collect garbage after each segment
+                try:
+                    src.close()
+                except Exception:
+                    pass
+                gc.collect()  # FIX 2: release memory after every video segment
 
-            comp = CompositeVideoClip(layers, size=(W, H))
-
-            # тишина через wave-модуль (совместимо со всеми версиями moviepy)
-            sil_clip = None
-            if dur > speech_dur + 0.05:
-                sil_path = self._make_silence(dur - speech_dur, tmp_dir, i)
-                sil_clip = AudioFileClip(str(sil_path))
-                full_audio = concatenate_audioclips([audio, sil_clip])
-            else:
-                full_audio = audio
-
-            clips.append(comp.set_audio(full_audio))
-
-            # FIX 2: закрываем src сразу, gc после каждого сегмента
-            try:
-                src.close()
-            except Exception:
-                pass
-            gc.collect()
-
-        # Финальная склейка и запись
+        # Final concat and render
         final = concatenate_videoclips(clips, method="compose")
         final.write_videofile(
             str(out),
@@ -577,11 +583,11 @@ class VideoAssembler:
             audio_codec="aac",
             temp_audiofile="temp_a.m4a",
             remove_temp=True,
-            threads=1,  # FIX 3: threads=1 — Railway не убьёт процесс за RAM
+            threads=1,  # FIX 5: threads=1 — prevents Railway OOM kills
             logger=None,
         )
 
-        # FIX 2: закрываем все клипы после записи
+        # FIX 2: close all clips after write to release file handles
         try:
             final.close()
         except Exception:
@@ -615,7 +621,7 @@ async def pipeline(text: str, progress) -> tuple[Path, dict]:
         progress.progress(15, f"📦 Сценарий готов: {n} шагов. Загружаю медиа...")
         mg = MediaGenerator()
 
-        # батчи по 5 — не перегружаем сеть
+        # batches of 5 — avoid overloading the network
         segs = []
         batch_size = 5
         for b in range(0, n, batch_size):
@@ -645,7 +651,7 @@ async def pipeline(text: str, progress) -> tuple[Path, dict]:
 
 # ════════════════════════════════════════════════════════════════════
 #  6. STREAMLIT UI
-#  Порт не задаётся в коде — Railway передаёт его через $PORT:
+#  Port is NOT set in code — Railway passes it via $PORT:
 #  CMD ["streamlit", "run", "app.py", "--server.port", "$PORT", "--server.address", "0.0.0.0"]
 # ════════════════════════════════════════════════════════════════════
 st.set_page_config(page_title="Nuraly AI Academy", page_icon="🎓", layout="centered")
@@ -719,6 +725,8 @@ if gen and topic.strip():
         st.session_state.checked = {}
         n = len(data["video_steps"])
         st.success(f"✅ Урок готов! {n} слайдов · ~{int(n*MIN_SLIDE_DUR/60)}+ минут")
+        # FIX 3: st.balloons() only AFTER video is fully saved and pipeline is closed
+        st.balloons()
     except Exception as e:
         progress.empty()
         st.error(f"Ошибка: {e}")
@@ -782,8 +790,6 @@ if st.session_state.video and Path(st.session_state.video).exists():
                             options,
                             q.get("explanation", ""),
                         )
-                        if is_correct:
-                            st.balloons()
         else:
             cols = st.columns(len(options))
             ok, ci, opts_s, _ = st.session_state.checked[i]
@@ -820,6 +826,8 @@ if st.session_state.video and Path(st.session_state.video).exists():
         st.markdown(f"### Результат: {score}/{len(quiz)} ({pct}%)")
         if pct == 100:
             st.success("🏆 Идеально! Ты полностью освоил тему!")
+            # FIX 3: st.balloons() placed at the very end of the block,
+            # after video is fully written and all clips are closed
             st.balloons()
         elif pct >= 70:
             st.info("👍 Отличный результат! Материал усвоен хорошо.")
