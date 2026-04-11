@@ -6,6 +6,15 @@ import streamlit as st
 import numpy as np
 
 # ════════════════════════════════════════════════════════════════════
+#  CRITICAL: Monkey-patch Pillow BEFORE MoviePy is imported anywhere.
+#  MoviePy (all versions < 2.x) calls PIL.Image.ANTIALIAS internally
+#  during .resize() — this was removed in Pillow 10+.
+#  This patch fixes it globally so MoviePy never crashes on it.
+# ════════════════════════════════════════════════════════════════════
+if not hasattr(Image, "ANTIALIAS"):
+    Image.ANTIALIAS = Image.LANCZOS  # Pillow 10+ fix for MoviePy internals
+
+# ════════════════════════════════════════════════════════════════════
 #  ImageMagick policy fix for Railway (moviepy TextClip)
 # ════════════════════════════════════════════════════════════════════
 try:
