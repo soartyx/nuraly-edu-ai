@@ -340,14 +340,19 @@ class MediaGenerator:
                 try:
                     async with httpx.AsyncClient(timeout=90, follow_redirects=True) as h:
                         resp = await h.get(best["link"])
+                    # Fix 1: Check HTTP status AND content size before writing
+                    if resp.status_code != 200 or len(resp.content) < 100_000:
+                        print(f"[pexels download] bad response: status={resp.status_code} size={len(resp.content)} bytes — skipping")
+                        continue
                     path.write_bytes(resp.content)
                 except Exception as e:
                     print(f"[pexels download] {e}")
                     path.unlink(missing_ok=True)
                     continue
 
-                if not path.exists() or path.stat().st_size < 10_000:
-                    print(f"[pexels '{query}'] file too small, skipping")
+                # Fix 1: 100KB minimum — anything smaller is not a real video
+                if not path.exists() or path.stat().st_size < 100_000:
+                    print(f"[pexels '{query}'] file too small ({path.stat().st_size if path.exists() else 0} bytes < 100KB), skipping")
                     path.unlink(missing_ok=True)
                     continue
 
@@ -445,8 +450,9 @@ class VideoAssembler:
 
                 # REQUIREMENT 3: Validate video file before passing to MoviePy
                 video_path = Path(seg["video"])
-                if not video_path.exists() or video_path.stat().st_size == 0:
-                    st.warning(f"Video file {video_path} is empty or missing. Skipping segment '{seg['title']}'.")
+                # Fix 2: 100KB minimum before passing to VideoFileClip
+                if not video_path.exists() or video_path.stat().st_size < 100_000:
+                    st.warning(f"Video file {video_path} is too small or missing ({video_path.stat().st_size if video_path.exists() else 0} bytes). Skipping segment '{seg['title']}'.")
                     continue
 
                 audio = AudioFileClip(str(audio_path))
