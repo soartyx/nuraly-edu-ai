@@ -321,26 +321,41 @@ class MediaGenerator:
                 if not video_files:
                     continue
 
-                # Task 3: safe max() with default=None
+                # Fix 5: Explicitly prefer hd > sd quality mp4 links.
+                # Pexels video_files each have a "quality" field ("hd","sd","uhd").
+                # We avoid "uhd" — it's often DRM-locked or too large for Railway RAM.
                 mp4_files = [f for f in video_files
                              if str(f.get("file_type", "")).lower() == "video/mp4"
                              and f.get("link")]
                 if not mp4_files:
-                    # fallback: any file with a link
                     mp4_files = [f for f in video_files if f.get("link")]
                 if not mp4_files:
                     continue
 
-                best = max(mp4_files,
-                           key=lambda f: f.get("width", 0) * f.get("height", 0),
-                           default=None)
+                def _quality_rank(f):
+                    q = str(f.get("quality", "")).lower()
+                    # hd=2 (best), sd=1 (ok), uhd=0 (avoid — too large / DRM)
+                    return {"hd": 2, "sd": 1}.get(q, 0)
+
+                # Sort: quality rank first, then resolution as tiebreaker
+                mp4_files.sort(
+                    key=lambda f: (_quality_rank(f), f.get("width", 0) * f.get("height", 0)),
+                    reverse=True,
+                )
+                best = mp4_files[0] if mp4_files else None
                 if best is None or not best.get("link"):
                     continue
 
                 try:
+                    # Fix 1: User-Agent prevents Pexels CDN from blocking the download
+                    dl_headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                      "Chrome/120.0.0.0 Safari/537.36"
+                    }
                     async with httpx.AsyncClient(timeout=90, follow_redirects=True) as h:
-                        resp = await h.get(best["link"])
-                    # Fix 1: Check HTTP status AND content size before writing
+                        resp = await h.get(best["link"], headers=dl_headers)
+                    # Fix 2: Strict 100KB size check — anything smaller is not a real video
                     if resp.status_code != 200 or len(resp.content) < 100_000:
                         print(f"[pexels download] bad response: status={resp.status_code} size={len(resp.content)} bytes — skipping")
                         continue
@@ -522,7 +537,10 @@ class VideoAssembler:
                         pass
                 gc.collect()
 
+        # Fix 4: explicit st.error + st.stop so user sees a clear message
         if not clips:
+            st.error("❌ ALL SEGMENTS FAILED. All downloaded videos were rejected. "
+                     "Try a different topic or check your PEXELS_API_KEY.")
             raise RuntimeError("No valid segments could be assembled. Check errors above.")
 
         final = concatenate_videoclips(clips, method="compose")
