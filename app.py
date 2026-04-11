@@ -14,7 +14,6 @@ except Exception as e:
     print(f"[warn] ImageMagick config: {e}")
 
 # Monkey-patch Pillow BEFORE MoviePy is imported anywhere.
-# MoviePy < 2.x calls PIL.Image.ANTIALIAS — removed in Pillow 10+.
 if not hasattr(Image, "ANTIALIAS"):
     Image.ANTIALIAS = Image.LANCZOS
 if not hasattr(Image, "LANCZOS"):
@@ -26,14 +25,7 @@ if not hasattr(Image, "LANCZOS"):
 api_key_val    = os.getenv("OPENAI_API_KEY")
 pexels_key_val = os.getenv("PEXELS_API_KEY")
 
-if not api_key_val:
-    print("[FATAL] OPENAI_API_KEY not set.")
-    sys.exit(1)
-if not pexels_key_val:
-    print("[FATAL] PEXELS_API_KEY not set.")
-    sys.exit(1)
-
-client = AsyncOpenAI(api_key=api_key_val)
+client = AsyncOpenAI(api_key=api_key_val) if api_key_val else None
 PK = pexels_key_val
 MIN_SLIDE_DUR = 18.0
 
@@ -247,7 +239,7 @@ class MediaGenerator:
                     qt=str(f.get("file_type","")).lower()
                     qq=str(f.get("quality","")).lower()
                     if qt!="video/mp4": return -1
-                    return {"hd":2,"sd":1}.get(qq,0)  # uhd=0, avoid AV1/HEVC
+                    return {"hd":2,"sd":1}.get(qq,0)
 
                 candidates=[f for f in vfiles if f.get("link") and _rank(f)>0]
                 if not candidates:
@@ -379,7 +371,7 @@ class VideoAssembler:
                 gc.collect()
 
         if not clips:
-            print("[FATAL] No valid clips assembled."); sys.exit(1)
+            raise RuntimeError("No valid clips assembled.")
 
         print(f"[info] Rendering {len(clips)} clips → {out}")
         final=concatenate_videoclips(clips,method="compose")
@@ -400,52 +392,42 @@ class VideoAssembler:
 # ════════════════════════════════════════════════════════════════════
 #  5. PIPELINE
 # ════════════════════════════════════════════════════════════════════
-async def pipeline(text: str) -> Path:
+async def pipeline(text: str, status_cb=None) -> tuple[Path, dict]:
+    """Run the full pipeline. status_cb(msg) is called for progress updates."""
+    def log(msg):
+        print(msg)
+        if status_cb: status_cb(msg)
+
     clean_tmp()
     tmp=Path(tempfile.mkdtemp()).resolve()
     try:
-        print("[1/4] Generating lesson script...")
+        log("⏳ Step 1/4 — Generating lesson script with GPT-4o-mini...")
         data=await StepParser().parse(text)
         steps=data.get("video_steps",[])
         if not steps:
-            print("[FATAL] 0 steps returned."); sys.exit(1)
-        print(f"[2/4] {len(steps)} steps. Fetching media...")
+            raise RuntimeError("0 steps returned from GPT.")
+        log(f"✅ Got {len(steps)} steps. Step 2/4 — Fetching media (TTS + Pexels videos)...")
 
         mg=MediaGenerator(); segs=[]; batch=5
         for b in range(0,len(steps),batch):
             chunk=steps[b:b+batch]
-            print(f"      Steps {b+1}–{min(b+batch,len(steps))}/{len(steps)}")
+            log(f"   📦 Processing steps {b+1}–{min(b+batch,len(steps))}/{len(steps)}...")
             results=await asyncio.gather(
                 *[mg.generate_step(s,b+i,tmp) for i,s in enumerate(chunk)],
                 return_exceptions=True)
             for idx,res in enumerate(results):
-                if isinstance(res,Exception): print(f"[error] step {b+idx+1}: {res}")
+                if isinstance(res,Exception): log(f"   ⚠️ Step {b+idx+1} failed: {res}")
                 else: segs.append(res)
 
         if not segs:
-            print("[FATAL] All steps failed."); sys.exit(1)
+            raise RuntimeError("All steps failed — no segments to assemble.")
 
-        # TASK 4: save to final_video.mp4
         out=Path("final_video.mp4").resolve()
-        print(f"[3/4] Assembling {len(segs)} segments → {out}")
+        log(f"🎬 Step 3/4 — Assembling {len(segs)} segments into video...")
         VideoAssembler().assemble(segs,out,tmp_dir=tmp)
 
-        print(f"\n[4/4] Done! Saved to: {out}")
-
-        quiz=data.get("quiz",[])
-        if quiz:
-            print("\n"+"═"*60+"\nQUIZ\n"+"═"*60)
-            for i,q in enumerate(quiz):
-                print(f"\nQ{i+1}: {q['q']}")
-                for j,o in enumerate(q["o"]):
-                    print(f"  {'✓' if j==q['a'] else ' '} {chr(65+j)}) {o}")
-                print(f"  → {q.get('explanation','')}")
-
-        if data.get("sum"):
-            print("\n"+"═"*60+"\nSUMMARY\n"+"═"*60)
-            print(data["sum"])
-
-        return out
+        log(f"✅ Step 4/4 — Done! Video saved to: {out}")
+        return out, data
     finally:
         shutil.rmtree(tmp,ignore_errors=True)
         for f in Path(".").glob("temp_a*"):
@@ -454,13 +436,120 @@ async def pipeline(text: str) -> Path:
 
 
 # ════════════════════════════════════════════════════════════════════
-#  TASK 3: Entry point
+#  6. STREAMLIT UI
+# ════════════════════════════════════════════════════════════════════
+def run_streamlit():
+    import streamlit as st
+
+    st.set_page_config(
+        page_title="AI Video Lesson Generator",
+        page_icon="🎬",
+        layout="centered",
+    )
+
+    st.title("🎬 AI Video Lesson Generator")
+    st.markdown(
+        "Enter any topic below and the app will generate a full university-level "
+        "video lesson with narration, visuals, a quiz, and a summary."
+    )
+
+    # ── API key warnings ──────────────────────────────────────────
+    if not api_key_val:
+        st.error("❌ `OPENAI_API_KEY` environment variable is not set. Please set it and restart.")
+        st.stop()
+    if not pexels_key_val:
+        st.error("❌ `PEXELS_API_KEY` environment variable is not set. Please set it and restart.")
+        st.stop()
+
+    # ── Input ─────────────────────────────────────────────────────
+    topic = st.text_input(
+        "📚 Lesson topic",
+        placeholder='e.g. "Sorting algorithms in Python" or "Photosynthesis"',
+        help="Be as specific or broad as you like. The AI will structure a 20–25 step lesson.",
+    )
+
+    generate_btn = st.button("🚀 Generate Video", type="primary", disabled=not topic.strip())
+
+    # ── Generation ────────────────────────────────────────────────
+    if generate_btn and topic.strip():
+        status_box = st.empty()
+        log_area   = st.expander("📋 Live logs", expanded=True)
+        log_lines  = []
+
+        def status_cb(msg):
+            log_lines.append(msg)
+            with log_area:
+                st.text("\n".join(log_lines))
+            status_box.info(msg)
+
+        with st.spinner("Generating your video lesson — this usually takes 5–15 minutes…"):
+            try:
+                out_path, data = asyncio.run(pipeline(topic.strip(), status_cb=status_cb))
+            except Exception as e:
+                st.error(f"❌ Generation failed: {e}")
+                st.stop()
+
+        status_box.success("🎉 Video generation complete!")
+
+        # ── Video player ──────────────────────────────────────────
+        st.subheader("🎥 Your Video Lesson")
+        if out_path.exists():
+            st.video(str(out_path))
+            with open(out_path, "rb") as f:
+                st.download_button(
+                    label="⬇️ Download MP4",
+                    data=f,
+                    file_name=f"{topic[:50].replace(' ','_')}.mp4",
+                    mime="video/mp4",
+                )
+        else:
+            st.warning("Video file not found after generation.")
+
+        # ── Quiz ──────────────────────────────────────────────────
+        quiz = data.get("quiz", [])
+        if quiz:
+            st.subheader("🧠 Quiz")
+            for i, q in enumerate(quiz):
+                with st.expander(f"Q{i+1}: {q['q']}"):
+                    for j, opt in enumerate(q["o"]):
+                        icon = "✅" if j == q["a"] else "◻️"
+                        st.markdown(f"{icon} **{chr(65+j)})** {opt}")
+                    st.info(f"**Explanation:** {q.get('explanation','')}")
+
+        # ── Summary ───────────────────────────────────────────────
+        summary = data.get("sum", "")
+        if summary:
+            st.subheader("📝 Summary")
+            st.write(summary)
+
+
+# ════════════════════════════════════════════════════════════════════
+#  ENTRY POINT — Streamlit first, CLI fallback
 # ════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print('Usage:   python app.py "Your lesson topic"')
-        print('Example: python app.py "Sorting algorithms in Python"')
-        sys.exit(1)
-    topic = " ".join(sys.argv[1:])
-    print(f'[info] Topic: {topic!r}')
-    asyncio.run(pipeline(topic))
+    # When run via `streamlit run app.py`, sys.argv[0] ends with app.py
+    # and streamlit injects its own args — detect that vs plain CLI usage.
+    is_streamlit = any("streamlit" in a for a in sys.argv)
+
+    if is_streamlit or len(sys.argv) == 1:
+        run_streamlit()
+    else:
+        # Legacy CLI mode
+        topic = " ".join(sys.argv[1:])
+        print(f"[info] Topic: {topic!r}")
+
+        async def _cli():
+            out, data = await pipeline(topic)
+            quiz = data.get("quiz", [])
+            if quiz:
+                print("\n" + "═"*60 + "\nQUIZ\n" + "═"*60)
+                for i, q in enumerate(quiz):
+                    print(f"\nQ{i+1}: {q['q']}")
+                    for j, o in enumerate(q["o"]):
+                        print(f"  {'✓' if j==q['a'] else ' '} {chr(65+j)}) {o}")
+                    print(f"  → {q.get('explanation','')}")
+            if data.get("sum"):
+                print("\n" + "═"*60 + "\nSUMMARY\n" + "═"*60)
+                print(data["sum"])
+
+        asyncio.run(_cli())
