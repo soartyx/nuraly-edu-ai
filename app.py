@@ -1,4 +1,4 @@
-import asyncio, json, tempfile, httpx, PIL.Image, io, re, shutil, math, os
+import asyncio, json, tempfile, httpx, PIL.Image, io, re, shutil, math, os, gc
 from pathlib import Path
 from openai import AsyncOpenAI
 import streamlit as st
@@ -486,6 +486,7 @@ class VideoAssembler:
             tmp_dir = Path(tempfile.mkdtemp())
         clips = []
         for i, seg in enumerate(segments):
+            # FIX 2 & 3: track all clips for explicit close, resize to 480p
             audio = AudioFileClip(str(seg["audio"]))
             speech_dur = audio.duration
             dur = max(speech_dur, MIN_SLIDE_DUR)
@@ -495,7 +496,7 @@ class VideoAssembler:
                 src.without_audio()
                 .subclip(0, min(speech_dur, src.duration))
                 .loop(duration=dur)
-                .resize(height=720)
+                .resize(height=480)  # FIX 3: downscale to 480p to reduce RAM usage
             )
             W, H = vid.w, vid.h
             layers = [vid]
@@ -503,6 +504,8 @@ class VideoAssembler:
             mid_img = pick_visual(seg, W, H)
             if mid_img:
                 try:
+                    # FIX 1: use LANCZOS instead of removed ANTIALIAS
+                    mid_img = mid_img.resize((W, H), PIL.Image.LANCZOS)
                     arr = np.array(mid_img)
                     ic = (
                         ImageClip(arr, ismask=False)
@@ -542,8 +545,16 @@ class VideoAssembler:
                 full_audio = concatenate_audioclips([audio, sil_clip])
             else:
                 full_audio = audio
+                sil_clip = None
 
             clips.append(comp.set_audio(full_audio))
+
+            # FIX 2: explicitly close source clip to free RAM, then collect garbage
+            try:
+                src.close()
+            except Exception:
+                pass
+            gc.collect()
 
         final = concatenate_videoclips(clips, method="compose")
         final.write_videofile(
@@ -556,6 +567,19 @@ class VideoAssembler:
             threads=4,
             logger=None,
         )
+
+        # FIX 2: close all assembled clips after write to free memory
+        try:
+            final.close()
+        except Exception:
+            pass
+        for clip in clips:
+            try:
+                clip.close()
+            except Exception:
+                pass
+        gc.collect()
+
         return out
 
 
