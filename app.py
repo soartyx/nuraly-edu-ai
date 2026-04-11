@@ -1,27 +1,38 @@
 import asyncio, json, tempfile, httpx, PIL.Image, io, re, shutil, math, os, gc
+from PIL import Image  # FIX 1: явный импорт для Image.LANCZOS
 from pathlib import Path
 from openai import AsyncOpenAI
 import streamlit as st
 import numpy as np
 
 # ════════════════════════════════════════════════════════════════════
-#  FIX 1: БЕЗОПАСНОЕ ПОЛУЧЕНИЕ КЛЮЧЕЙ (Railway + Streamlit Cloud)
-#  Не упадёт при отсутствии secrets.toml
+#  FIX 2: ImageMagick policy fix для Railway (moviepy TextClip)
 # ════════════════════════════════════════════════════════════════════
-api_key_val = os.environ.get("OPENAI_API_KEY") or (
+try:
+    from moviepy.config import change_settings
+
+    change_settings(
+        {"IMAGEMAGICK_BINARY": os.environ.get("IMAGEMAGICK_BINARY", "convert")}
+    )
+except Exception:
+    pass
+
+# ════════════════════════════════════════════════════════════════════
+#  FIX 4: БЕЗОПАСНОЕ ПОЛУЧЕНИЕ КЛЮЧЕЙ через os.getenv (Railway Variables)
+# ════════════════════════════════════════════════════════════════════
+api_key_val = os.getenv("OPENAI_API_KEY") or (
     st.secrets["OPENAI_API_KEY"] if "OPENAI_API_KEY" in st.secrets else None
 )
-pexels_key_val = os.environ.get("PEXELS_API_KEY") or (
+pexels_key_val = os.getenv("PEXELS_API_KEY") or (
     st.secrets["PEXELS_API_KEY"] if "PEXELS_API_KEY" in st.secrets else None
 )
 
 if not api_key_val:
     st.error("Критическая ошибка: API ключи не найдены в системе Railway!")
 
-# FIX 2: LANCZOS — единственное место, гарантируем совместимость с Pillow 10+
-# Если по каким-то причинам атрибут отсутствует, создаём алиас
-if not hasattr(PIL.Image, "LANCZOS"):
-    PIL.Image.LANCZOS = PIL.Image.BICUBIC  # крайний fallback для очень старых версий
+# FIX 1: гарантируем наличие LANCZOS (Pillow 10+, ANTIALIAS удалён)
+if not hasattr(Image, "LANCZOS"):
+    Image.LANCZOS = Image.BICUBIC  # крайний fallback
 
 client = AsyncOpenAI(api_key=api_key_val)
 PK = pexels_key_val
@@ -82,15 +93,15 @@ class StepParser:
 # ════════════════════════════════════════════════════════════════════
 #  2. ВИЗУАЛИЗАЦИИ
 # ════════════════════════════════════════════════════════════════════
-def _save_fig(fig, w, h) -> PIL.Image.Image | None:
+def _save_fig(fig, w, h) -> Image.Image | None:
     import matplotlib.pyplot as plt
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight", transparent=True, dpi=100)
     plt.close(fig)
     buf.seek(0)
-    img = PIL.Image.open(buf).convert("RGBA")
-    canvas = PIL.Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    img = Image.open(buf).convert("RGBA")
+    canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     ox, oy = (w - img.width) // 2, (h - img.height) // 2
     canvas.paste(img, (max(0, ox), max(0, oy)), img)
     return canvas
@@ -98,9 +109,10 @@ def _save_fig(fig, w, h) -> PIL.Image.Image | None:
 
 def render_formula_image(
     formula: str, w: int = 1280, h: int = 720
-) -> PIL.Image.Image | None:
+) -> Image.Image | None:
     try:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
@@ -135,9 +147,10 @@ def render_formula_image(
 
 def render_scheme_image(
     desc: str, title: str, w: int = 1280, h: int = 720
-) -> PIL.Image.Image | None:
+) -> Image.Image | None:
     try:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from matplotlib.patches import FancyBboxPatch
@@ -205,9 +218,10 @@ def render_scheme_image(
 
 def render_code_image(
     code: str, title: str, w: int = 1280, h: int = 720
-) -> PIL.Image.Image | None:
+) -> Image.Image | None:
     try:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from matplotlib.patches import FancyBboxPatch
@@ -253,9 +267,31 @@ def render_code_image(
             fontweight="bold",
         )
         kw = {
-            "def", "class", "return", "import", "for", "if", "else", "elif",
-            "while", "in", "and", "or", "not", "True", "False", "None", "from",
-            "with", "lambda", "try", "except", "finally", "yield", "async", "await",
+            "def",
+            "class",
+            "return",
+            "import",
+            "for",
+            "if",
+            "else",
+            "elif",
+            "while",
+            "in",
+            "and",
+            "or",
+            "not",
+            "True",
+            "False",
+            "None",
+            "from",
+            "with",
+            "lambda",
+            "try",
+            "except",
+            "finally",
+            "yield",
+            "async",
+            "await",
         }
         lines = code.strip().split("\n")[:14]
         for li, line in enumerate(lines):
@@ -295,11 +331,10 @@ def render_code_image(
         return None
 
 
-def render_chart_image(
-    title: str, w: int = 1280, h: int = 720
-) -> PIL.Image.Image | None:
+def render_chart_image(title: str, w: int = 1280, h: int = 720) -> Image.Image | None:
     try:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
@@ -331,7 +366,7 @@ def render_chart_image(
         return None
 
 
-def pick_visual(seg: dict, W: int, H: int) -> PIL.Image.Image | None:
+def pick_visual(seg: dict, W: int, H: int) -> Image.Image | None:
     vt = seg.get("viz_type", "none")
     if vt == "formula" and seg.get("formula"):
         return render_formula_image(seg["formula"], W, H)
@@ -458,7 +493,6 @@ class VideoAssembler:
             tmp_dir = Path(tempfile.mkdtemp())
 
         clips = []
-        # FIX 3: отдельный список для явного закрытия src-клипов после каждого сегмента
         src_clips_to_close = []
 
         for i, seg in enumerate(segments):
@@ -466,7 +500,6 @@ class VideoAssembler:
             speech_dur = audio.duration
             dur = max(speech_dur, MIN_SLIDE_DUR)
 
-            # FIX 3: открываем src и запоминаем для закрытия
             src = VideoFileClip(str(seg["video"]))
             src_clips_to_close.append(src)
 
@@ -482,11 +515,10 @@ class VideoAssembler:
             mid_img = pick_visual(seg, W, H)
             if mid_img:
                 try:
-                    # FIX 2: PIL.Image.LANCZOS (Pillow 10+), ANTIALIAS удалён
-                    mid_img = mid_img.resize((W, H), PIL.Image.LANCZOS)
+                    # FIX 1: Image.LANCZOS вместо PIL.Image.ANTIALIAS
+                    mid_img = mid_img.resize((W, H), Image.LANCZOS)
                     arr = np.array(mid_img)
-                    # FIX 3: явно удаляем PIL-объект из памяти после конвертации
-                    del mid_img
+                    del mid_img  # FIX 2: освобождаем PIL-объект сразу после конвертации
                     ic = (
                         ImageClip(arr, ismask=False)
                         .set_duration(dur)
@@ -529,13 +561,11 @@ class VideoAssembler:
 
             clips.append(comp.set_audio(full_audio))
 
-            # FIX 3: закрываем src сразу после того, как нарезали нужный subclip —
-            # MoviePy уже скопировал данные, держать файл открытым не нужно
+            # FIX 2: закрываем src сразу, gc после каждого сегмента
             try:
                 src.close()
             except Exception:
                 pass
-            # FIX 3: принудительная сборка мусора после каждого сегмента
             gc.collect()
 
         # Финальная склейка и запись
@@ -547,11 +577,11 @@ class VideoAssembler:
             audio_codec="aac",
             temp_audiofile="temp_a.m4a",
             remove_temp=True,
-            threads=4,
+            threads=1,  # FIX 3: threads=1 — Railway не убьёт процесс за RAM
             logger=None,
         )
 
-        # FIX 3: закрываем все клипы после записи, чтобы освободить дескрипторы
+        # FIX 2: закрываем все клипы после записи
         try:
             final.close()
         except Exception:
@@ -615,9 +645,8 @@ async def pipeline(text: str, progress) -> tuple[Path, dict]:
 
 # ════════════════════════════════════════════════════════════════════
 #  6. STREAMLIT UI
-#  FIX 4: порт НЕ задаётся в коде — Railway передаёт его через $PORT
-#          Streamlit читает его автоматически при запуске:
-#          CMD ["streamlit", "run", "app.py", "--server.port", "$PORT", ...]
+#  Порт не задаётся в коде — Railway передаёт его через $PORT:
+#  CMD ["streamlit", "run", "app.py", "--server.port", "$PORT", "--server.address", "0.0.0.0"]
 # ════════════════════════════════════════════════════════════════════
 st.set_page_config(page_title="Nuraly AI Academy", page_icon="🎓", layout="centered")
 
