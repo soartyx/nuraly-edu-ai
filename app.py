@@ -125,10 +125,13 @@ def get_youtube():
     return build("youtube", "v3", developerKey=st.secrets["YOUTUBE_API_KEY"])
 
 
-# ── Translate topic → professional English YouTube query ─────────────
+# ── Detect language + translate to English in one GPT call ───────────
 @st.cache_data(show_spinner=False)
-def translate_to_search_query(topic: str) -> str:
-    """Use GPT to turn any-language topic into a concise English YouTube search query."""
+def detect_and_translate(topic: str) -> tuple[str, str]:
+    """
+    Returns (detected_language_name, english_search_query).
+    Single GPT call — JSON output keeps it fast and unambiguous.
+    """
     oai = get_openai()
     resp = oai.chat.completions.create(
         model="gpt-4o-mini",
@@ -136,17 +139,23 @@ def translate_to_search_query(topic: str) -> str:
             {
                 "role": "system",
                 "content": (
-                    "You are a search query optimizer. "
-                    "Translate the user's topic into a concise, professional English YouTube search query "
-                    "(5-8 words max). Output ONLY the query string — no quotes, no explanation."
+                    "You are a language detector and search query optimizer. "
+                    "Return ONLY valid JSON with two keys:\n"
+                    '  "language": full English name of the detected language '
+                    '(e.g. "Russian", "Kazakh", "English", "German")\n'
+                    '  "query": concise professional English YouTube search query, '
+                    "5-8 words, no quotes\n"
+                    "No preamble, no markdown fences."
                 ),
             },
             {"role": "user", "content": topic},
         ],
-        temperature=0.2,
-        max_tokens=30,
+        temperature=0.1,
+        max_tokens=60,
+        response_format={"type": "json_object"},
     )
-    return resp.choices[0].message.content.strip()
+    data = json.loads(resp.choices[0].message.content)
+    return data.get("language", "English"), data.get("query", topic)
 
 
 # ── YouTube ───────────────────────────────────────────────────────────
@@ -173,43 +182,36 @@ def search_youtube(english_query: str) -> str | None:
 
 # ── OpenAI: full lesson payload ───────────────────────────────────────
 @st.cache_data(show_spinner=False)
-def generate_lesson(topic: str) -> dict:
+def generate_lesson(topic: str, language: str = "English") -> dict:
     """
-    Returns:
-      summary   – markdown string (## headers + bullet points)
-      keywords  – list[str]  (5 key concepts)
-      quiz      – list[{question, options[4], answer_index, explanation}]
-      problems  – list[{title, body, difficulty}]
-      solution  – {problem, steps: list[str], answer}
+    Returns summary, keywords, quiz, problems, solution — all in `language`.
     """
     oai = get_openai()
-    system = """You are an expert educator. Return ONLY valid JSON — no markdown fences, no preamble.
-
-Schema:
-{
-  "summary": "markdown with ## Section headers and - bullet points (250-350 words)",
-  "keywords": ["concept1", "concept2", "concept3", "concept4", "concept5"],
-  "quiz": [
-    {"question": "...", "options": ["A","B","C","D"], "answer_index": 0, "explanation": "..."}
-  ],
-  "problems": [
-    {"title": "short title", "body": "full problem statement", "difficulty": "Easy|Medium|Hard"}
-  ],
-  "solution": {
-    "problem": "A single moderately complex problem statement",
-    "steps": ["Step 1: ...", "Step 2: ...", "Step 3: ...", "Step 4: ...", "Step 5: ..."],
-    "answer": "Final concise answer"
-  }
-}
-
-Rules:
-- ALL TEXT must be written in Russian (summary, keywords, quiz, problems, solution — everything).
-- summary: 250-350 words with 3-4 ## headers
-- keywords: exactly 5 key terms from the topic
-- quiz: exactly 5 questions, answer_index is 0-based integer
-- problems: 4 problems varying in difficulty (Easy, Medium, Medium, Hard) — difficulty label in English, text in Russian
-- solution: 5 clear numbered steps for one worked example
-"""
+    schema = (
+        '{"summary":"markdown with ## Section headers and - bullet points (250-350 words)",'
+        '"keywords":["concept1","concept2","concept3","concept4","concept5"],'
+        '"quiz":[{"question":"...","options":["A","B","C","D"],"answer_index":0,"explanation":"..."}],'
+        '"problems":[{"title":"short title","body":"full problem statement","difficulty":"Easy|Medium|Hard"}],'
+        '"solution":{"problem":"A moderately complex problem statement",'
+        '"steps":["Step 1: ...","Step 2: ...","Step 3: ...","Step 4: ...","Step 5: ..."],'
+        '"answer":"Final concise answer"}}'
+    )
+    system = (
+        "You are a helpful assistant and expert educator. "
+        "Return ONLY valid JSON — no markdown fences, no preamble.\n\n"
+        f"CRITICAL: Write ALL text fields strictly in {language}. "
+        "This includes summary, keywords, quiz questions, options, explanations, "
+        "problem titles, bodies, solution steps, and the final answer. "
+        "The ONLY exception is the \"difficulty\" field which stays in English (Easy/Medium/Hard).\n\n"
+        f"Schema: {schema}\n\n"
+        f"Rules:\n"
+        f"- Output language: {language} (strictly enforced for every text field)\n"
+        "- summary: 250-350 words with 3-4 ## headers\n"
+        "- keywords: exactly 5 key terms\n"
+        "- quiz: exactly 5 questions, answer_index is 0-based integer\n"
+        "- problems: 4 problems with difficulty Easy, Medium, Medium, Hard\n"
+        "- solution: 5 clear numbered steps for one worked example"
+    )
     resp = oai.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
@@ -227,11 +229,12 @@ Rules:
 #  SESSION STATE INIT
 # ══════════════════════════════════════════════════════════════════════
 for key, default in [
-    ("lesson_data",    None),
-    ("video_url",      None),
-    ("current_topic",  ""),
-    ("quiz_answers",   {}),
-    ("quiz_submitted", False),
+    ("lesson_data",       None),
+    ("video_url",         None),
+    ("current_topic",     ""),
+    ("detected_language", "English"),
+    ("quiz_answers",      {}),
+    ("quiz_submitted",    False),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -268,9 +271,10 @@ if go and topic_input.strip():
     st.session_state.current_topic = new_topic
 
     with st.spinner("Generating your lesson…"):
-        english_query = translate_to_search_query(new_topic)
+        detected_lang, english_query = detect_and_translate(new_topic)
+        st.session_state.detected_language = detected_lang
         st.session_state.video_url   = search_youtube(english_query)
-        st.session_state.lesson_data = generate_lesson(new_topic)
+        st.session_state.lesson_data = generate_lesson(new_topic, language=detected_lang)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -280,7 +284,10 @@ if st.session_state.lesson_data and st.session_state.current_topic:
     topic  = st.session_state.current_topic
     lesson = st.session_state.lesson_data
 
-    st.markdown(f'<div class="topic-pill">📚 {topic}</div>', unsafe_allow_html=True)
+    lang = st.session_state.detected_language
+    st.markdown(
+        f'<div class="topic-pill">📚 {topic} &nbsp;·&nbsp; 🌐 {lang}</div>',
+        unsafe_allow_html=True)
 
     tab_video, tab_summary, tab_quiz, tab_practice = st.tabs(
         ["📺 Video", "📝 Summary", "🧠 Quiz", "✍️ Practice"]
