@@ -125,16 +125,42 @@ def get_youtube():
     return build("youtube", "v3", developerKey=st.secrets["YOUTUBE_API_KEY"])
 
 
+# ── Translate topic → professional English YouTube query ─────────────
+@st.cache_data(show_spinner=False)
+def translate_to_search_query(topic: str) -> str:
+    """Use GPT to turn any-language topic into a concise English YouTube search query."""
+    oai = get_openai()
+    resp = oai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a search query optimizer. "
+                    "Translate the user's topic into a concise, professional English YouTube search query "
+                    "(5-8 words max). Output ONLY the query string — no quotes, no explanation."
+                ),
+            },
+            {"role": "user", "content": topic},
+        ],
+        temperature=0.2,
+        max_tokens=30,
+    )
+    return resp.choices[0].message.content.strip()
+
+
 # ── YouTube ───────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
-def search_youtube(topic: str) -> str | None:
+def search_youtube(english_query: str) -> str | None:
     try:
         yt = get_youtube()
         resp = yt.search().list(
-            q=f"{topic} explained tutorial",
+            q=f"{english_query} explained tutorial",
             part="id,snippet", type="video",
             maxResults=5, videoDuration="medium",
-            relevanceLanguage="en", safeSearch="strict",
+            relevanceLanguage="ru",   # surface Russia/CIS-popular results
+            regionCode="KZ",          # bias toward Kazakhstan region
+            safeSearch="strict",
         ).execute()
         items = resp.get("items", [])
         if not items:
@@ -177,10 +203,11 @@ Schema:
 }
 
 Rules:
+- ALL TEXT must be written in Russian (summary, keywords, quiz, problems, solution — everything).
 - summary: 250-350 words with 3-4 ## headers
 - keywords: exactly 5 key terms from the topic
 - quiz: exactly 5 questions, answer_index is 0-based integer
-- problems: 4 problems varying in difficulty (Easy, Medium, Medium, Hard)
+- problems: 4 problems varying in difficulty (Easy, Medium, Medium, Hard) — difficulty label in English, text in Russian
 - solution: 5 clear numbered steps for one worked example
 """
     resp = oai.chat.completions.create(
@@ -241,7 +268,8 @@ if go and topic_input.strip():
     st.session_state.current_topic = new_topic
 
     with st.spinner("Generating your lesson…"):
-        st.session_state.video_url   = search_youtube(new_topic)
+        english_query = translate_to_search_query(new_topic)
+        st.session_state.video_url   = search_youtube(english_query)
         st.session_state.lesson_data = generate_lesson(new_topic)
 
 
