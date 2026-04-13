@@ -15,7 +15,8 @@ import json
 import re
 import streamlit as st
 from openai import OpenAI
-from google import genai as genai_new
+# Вместо старого импорта напиши:
+from google import genai
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -152,8 +153,8 @@ def get_openai() -> OpenAI:
 
 @st.cache_resource
 def get_gemini():
-    return genai_new.Client(api_key=st.secrets["GEMINI_API_KEY"])
-
+    # Используем официальный класс из нового SDK
+    return genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
 # ══════════════════════════════════════════════════════════════════════
 #  YOUTUBE KEY ROTATION
@@ -264,7 +265,7 @@ Rules:
 - quiz_count_hint logic: count the number of distinct key concepts; clamp to [3, 10].
 """
     result = gem.models.generate_content(
-      model="models/gemini-1.5-flash",
+        model="gemini-2.0-flash",
         contents=prompt,
     )
     raw = result.text.strip()
