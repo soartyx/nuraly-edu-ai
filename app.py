@@ -264,7 +264,7 @@ Rules:
 - quiz_count_hint logic: count the number of distinct key concepts; clamp to [3, 10].
 """
     result = gem.models.generate_content(
-        model="gemini-2.0-flash",
+       model="gemini-1.5-flash",
         contents=prompt,
     )
     raw = result.text.strip()
