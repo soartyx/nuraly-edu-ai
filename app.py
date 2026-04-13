@@ -266,7 +266,7 @@ Rules:
 """
     result = gem.models.generate_content(
         # Строка 268 в app.py
-model="gemini-1.5-flash",
+model="gemini-1.5-flash-8b",
         contents=prompt,
     )
     raw = result.text.strip()
