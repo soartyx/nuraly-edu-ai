@@ -15,7 +15,7 @@ import json
 import re
 import streamlit as st
 from openai import OpenAI
-import google.generativeai as genai
+from google import genai as genai_new
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -152,8 +152,7 @@ def get_openai() -> OpenAI:
 
 @st.cache_resource
 def get_gemini():
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    return genai.GenerativeModel("gemini-1.5-flash")
+    return genai_new.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -264,7 +263,10 @@ Rules:
 - mermaid: use only safe ASCII node IDs (A, B, C ...), label in {language} with square-bracket syntax: A[Лейбл].
 - quiz_count_hint logic: count the number of distinct key concepts; clamp to [3, 10].
 """
-    result = gem.generate_content(prompt)
+    result = gem.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt,
+    )
     raw = result.text.strip()
     # Strip accidental fences
     raw = re.sub(r"^```[a-z]*\n?", "", raw)
@@ -396,7 +398,7 @@ st.markdown("")
 col_input, col_btn = st.columns([5, 1])
 with col_input:
     topic_input = st.text_input(
-        "", placeholder="Введи тему… напр. «Деревья Фенвика», «Законы Ньютона»",
+        "Тема урока", placeholder="Введи тему… напр. «Деревья Фенвика», «Законы Ньютона»",
         label_visibility="collapsed", key="topic_input",
     )
 with col_btn:
