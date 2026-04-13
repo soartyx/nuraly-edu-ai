@@ -15,8 +15,6 @@ import json
 import re
 import streamlit as st
 from openai import OpenAI
-# Вместо старого импорта напиши:
-from google import genai
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -151,10 +149,8 @@ hr { border-color: #1a1a2e; }
 def get_openai() -> OpenAI:
     return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-@st.cache_resource
-def get_gemini():
-    # Используем официальный класс из нового SDK
-    return genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+
+
 
 # ══════════════════════════════════════════════════════════════════════
 #  YOUTUBE KEY ROTATION
@@ -238,42 +234,43 @@ def detect_and_translate(topic: str) -> tuple[str, str]:
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  GEMINI: SUMMARY + MERMAID DIAGRAM
+#  GPT-4o-mini: SUMMARY + MERMAID DIAGRAM
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_data(show_spinner=False)
 def generate_summary_and_diagram(topic: str, language: str, level: str) -> dict:
     """
-    Uses Gemini 1.5 Flash.
+    Uses GPT-4o-mini (replaces Gemini — no quota issues).
     Returns {summary, keywords, mermaid, quiz_count_hint}.
-    quiz_count_hint: integer 3-10 that Gemini recommends based on topic breadth.
     """
-    gem = get_gemini()
+    oai = get_openai()
 
-    prompt = f"""You are an expert educator. Topic: "{topic}". Output language: {language}. Level: {level}.
-
-Return ONLY valid JSON (no fences):
-{{
-  "summary": "markdown string, 3-4 ## headers, bullet points, 250-350 words, in {language}",
-  "keywords": ["term1","term2","term3","term4","term5"],
-  "mermaid": "a valid Mermaid diagram (graph LR or flowchart LR) summarising the topic structure, labels in {language}, no backticks",
-  "quiz_count_hint": <integer 3-10: 3 for narrow/single-concept topics, 7-10 for broad multi-concept topics>
-}}
-
-Rules:
-- All text in {language} except JSON keys and "mermaid" syntax keywords.
-- mermaid: use only safe ASCII node IDs (A, B, C ...), label in {language} with square-bracket syntax: A[Лейбл].
-- quiz_count_hint logic: count the number of distinct key concepts; clamp to [3, 10].
-"""
-    result = gem.models.generate_content(
-        # Строка 268 в app.py
-model="gemini-1.5-flash-8b",
-        contents=prompt,
+    system = (
+        "You are an expert educator. Return ONLY valid JSON — no markdown fences, no preamble.\n"
+        f"Output language: {language}. Level: {level}.\n\n"
+        "Schema:\n"
+        '{\n'
+        '  "summary": "markdown, 3-4 ## headers, bullet points, 250-350 words",\n'
+        '  "keywords": ["term1","term2","term3","term4","term5"],\n'
+        '  "mermaid": "valid Mermaid diagram (graph LR), ASCII node IDs, labels in output language, no backticks",\n'
+        '  "quiz_count_hint": <integer 3-10>\n'
+        '}\n\n'
+        "Rules:\n"
+        f"- All text in {language} except JSON keys and Mermaid syntax keywords.\n"
+        "- mermaid: use A[Label] syntax, keep it under 8 nodes.\n"
+        "- quiz_count_hint: 3 for narrow topics, 7-10 for broad multi-concept topics."
     )
-    raw = result.text.strip()
-    # Strip accidental fences
-    raw = re.sub(r"^```[a-z]*\n?", "", raw)
-    raw = re.sub(r"\n?```$", "", raw)
-    return json.loads(raw)
+
+    resp = oai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": f"Topic: {topic}"},
+        ],
+        temperature=0.4,
+        max_tokens=1800,
+        response_format={"type": "json_object"},
+    )
+    return json.loads(resp.choices[0].message.content)
 
 
 # ══════════════════════════════════════════════════════════════════════
