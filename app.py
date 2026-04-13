@@ -6,14 +6,17 @@ Features:
   • User flow gate: lesson unlocks after "I've watched the video" confirmation
   • Difficulty level selector (Новичок / Профи)
   • Dynamic quiz size (3–10 questions) based on topic breadth + difficulty
-  • Gemini 1.5 Flash for summary + Mermaid diagram
+  • Summary + Mermaid diagram via GPT-4o-mini
   • Optional Deep Research mode via GPT-4o (checkbox)
   • On-demand code/deep-dive expander in Practice tab
+  • Image search: GPT returns direct URLs from Wikimedia/Unsplash/edu sites
+  • Mermaid rendered via st.components.v1.html (no raw code shown)
 """
 
 import json
 import re
 import streamlit as st
+import streamlit.components.v1 as components
 from openai import OpenAI
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -150,6 +153,94 @@ def get_openai() -> OpenAI:
     return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  MERMAID RENDERER  (renders via CDN, no raw code shown)
+# ══════════════════════════════════════════════════════════════════════
+def render_mermaid(mermaid_src: str, height: int = 420) -> None:
+    """Render a Mermaid diagram inside an iframe using mermaid.js CDN."""
+    # Escape backticks and backslashes for safe embedding in JS template literal
+    safe_src = mermaid_src.replace("\\", "\\\\").replace("`", "\\`")
+    html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    body {{
+      margin: 0; padding: 12px;
+      background: #0f0f1a;
+      display: flex; justify-content: center; align-items: flex-start;
+    }}
+    .mermaid svg {{
+      max-width: 100%; height: auto;
+      background: transparent;
+    }}
+    /* Override mermaid default light colors for dark bg */
+    .mermaid .node rect, .mermaid .node circle, .mermaid .node ellipse,
+    .mermaid .node polygon, .mermaid .node path {{
+      fill: #1e1b4b !important; stroke: #4f46e5 !important;
+    }}
+    .mermaid .node .label {{ color: #a5b4fc !important; fill: #a5b4fc !important; }}
+    .mermaid .edgeLabel {{ background: #13131e !important; color: #9ca3af !important; }}
+    .mermaid .edgePath .path {{ stroke: #6366f1 !important; }}
+  </style>
+</head>
+<body>
+  <div class="mermaid">{mermaid_src}</div>
+  <script>
+    mermaid.initialize({{
+      startOnLoad: true,
+      theme: 'dark',
+      themeVariables: {{
+        primaryColor: '#1e1b4b',
+        primaryTextColor: '#a5b4fc',
+        primaryBorderColor: '#4f46e5',
+        lineColor: '#6366f1',
+        secondaryColor: '#13131e',
+        tertiaryColor: '#0b0b12',
+        background: '#0f0f1a',
+        mainBkg: '#1e1b4b',
+        nodeBorder: '#4f46e5',
+        clusterBkg: '#13131e',
+        titleColor: '#c084fc',
+        edgeLabelBackground: '#13131e',
+        fontFamily: 'Sora, sans-serif'
+      }}
+    }});
+  </script>
+</body>
+</html>
+"""
+    components.html(html, height=height, scrolling=False)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  IMAGE URL PARSER
+# ══════════════════════════════════════════════════════════════════════
+def extract_image_urls(text: str) -> list[str]:
+    """
+    Extract direct image URLs (jpg/jpeg/png/gif/svg/webp) from text.
+    Accepts both plain URLs and JSON arrays of strings.
+    """
+    # Try JSON array first
+    try:
+        data = json.loads(text)
+        if isinstance(data, list):
+            return [u for u in data if isinstance(u, str) and u.startswith("http")]
+        if isinstance(data, dict):
+            # Could be {"urls": [...]} or similar
+            for v in data.values():
+                if isinstance(v, list):
+                    urls = [u for u in v if isinstance(u, str) and u.startswith("http")]
+                    if urls:
+                        return urls
+    except Exception:
+        pass
+
+    # Regex fallback: find any http/https URL ending in image extension
+    pattern = r'https?://[^\s\'"<>)]+\.(?:jpg|jpeg|png|gif|svg|webp)(?:\?[^\s\'"<>)]*)?'
+    return re.findall(pattern, text, re.IGNORECASE)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -189,7 +280,6 @@ def search_youtube(english_query: str) -> str | None:
                 return f"https://www.youtube.com/watch?v={items[0]['id']['videoId']}"
         except HttpError as e:
             if e.resp.status == 403:
-                # Quota exceeded — try next key
                 continue
             st.warning(f"YouTube API error: {e}")
             return None
@@ -202,7 +292,7 @@ def search_youtube(english_query: str) -> str | None:
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  LANGUAGE DETECTION + TRANSLATION  (OpenAI, fast)
+#  LANGUAGE DETECTION + TRANSLATION
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_data(show_spinner=False)
 def detect_and_translate(topic: str) -> tuple[str, str]:
@@ -234,13 +324,13 @@ def detect_and_translate(topic: str) -> tuple[str, str]:
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  GPT-4o-mini: SUMMARY + MERMAID DIAGRAM
+#  GPT-4o-mini: SUMMARY + MERMAID + IMAGE URLS
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_data(show_spinner=False)
 def generate_summary_and_diagram(topic: str, language: str, level: str) -> dict:
     """
-    Uses GPT-4o-mini (replaces Gemini — no quota issues).
-    Returns {summary, keywords, mermaid, quiz_count_hint}.
+    Returns {summary, keywords, mermaid, quiz_count_hint, image_urls}.
+    image_urls: list of direct image URLs from Wikimedia/Unsplash/edu sources.
     """
     oai = get_openai()
 
@@ -252,12 +342,18 @@ def generate_summary_and_diagram(topic: str, language: str, level: str) -> dict:
         '  "summary": "markdown, 3-4 ## headers, bullet points, 250-350 words",\n'
         '  "keywords": ["term1","term2","term3","term4","term5"],\n'
         '  "mermaid": "valid Mermaid diagram (graph LR), ASCII node IDs, labels in output language, no backticks",\n'
-        '  "quiz_count_hint": <integer 3-10>\n'
+        '  "quiz_count_hint": <integer 3-10>,\n'
+        '  "image_urls": ["<direct_url_1>", "<direct_url_2>"]\n'
         '}\n\n'
         "Rules:\n"
         f"- All text in {language} except JSON keys and Mermaid syntax keywords.\n"
         "- mermaid: use A[Label] syntax, keep it under 8 nodes.\n"
-        "- quiz_count_hint: 3 for narrow topics, 7-10 for broad multi-concept topics."
+        "- quiz_count_hint: 3 for narrow topics, 7-10 for broad multi-concept topics.\n"
+        "- image_urls: provide 1-3 DIRECT image URLs (ending in .jpg/.jpeg/.png/.svg/.webp) "
+        "from trusted sources ONLY: upload.wikimedia.org, commons.wikimedia.org, "
+        "images.unsplash.com, or well-known educational/scientific websites. "
+        "URLs must be publicly accessible without authentication. "
+        "If you cannot provide real verified URLs, return an empty array []."
     )
 
     resp = oai.chat.completions.create(
@@ -267,24 +363,24 @@ def generate_summary_and_diagram(topic: str, language: str, level: str) -> dict:
             {"role": "user", "content": f"Topic: {topic}"},
         ],
         temperature=0.4,
-        max_tokens=1800,
+        max_tokens=2000,
         response_format={"type": "json_object"},
     )
-    return json.loads(resp.choices[0].message.content)
+    data = json.loads(resp.choices[0].message.content)
+    # Ensure image_urls is always a list
+    if "image_urls" not in data or not isinstance(data["image_urls"], list):
+        data["image_urls"] = []
+    return data
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  OPENAI: QUIZ + PRACTICE PROBLEMS  (dynamic size, level-aware)
+#  OPENAI: QUIZ + PRACTICE PROBLEMS
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_data(show_spinner=False)
 def generate_quiz_and_practice(
     topic: str, language: str, level: str, n_questions: int
 ) -> dict:
-    """
-    Uses GPT-4o-mini.
-    Returns {quiz, problems, solution}.
-    level: "Новичок" | "Профи"
-    """
+    """Returns {quiz, problems, solution}."""
     oai = get_openai()
 
     level_instruction = (
@@ -334,10 +430,6 @@ def generate_quiz_and_practice(
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_data(show_spinner=False)
 def deep_research(topic: str, language: str) -> str:
-    """
-    GPT-4o searches for real-world problems related to the topic
-    (textbooks, open sources) and returns a markdown string.
-    """
     oai = get_openai()
     resp = oai.chat.completions.create(
         model="gpt-4o",
@@ -367,10 +459,10 @@ DEFAULTS = {
     "current_topic":     "",
     "detected_language": "English",
     "video_url":         None,
-    "summary_data":      None,   # from Gemini
-    "lesson_data":       None,   # quiz + practice from GPT
+    "summary_data":      None,
+    "lesson_data":       None,
     "deep_research_md":  None,
-    "video_confirmed":   False,  # gate flag
+    "video_confirmed":   False,
     "quiz_answers":      {},
     "quiz_submitted":    False,
 }
@@ -423,29 +515,28 @@ if go and topic_input.strip():
     topic_changed = new_topic != st.session_state.current_topic
 
     if topic_changed:
-        # Reset all derived state
         for k, v in DEFAULTS.items():
             st.session_state[k] = v
         st.session_state.current_topic = new_topic
 
-    with st.spinner("🌐 Определяю язык и ищу видео…"):
+    with st.spinner("Обработка данных..."):
         lang, en_query = detect_and_translate(new_topic)
         st.session_state.detected_language = lang
         st.session_state.video_url = search_youtube(en_query)
 
-    with st.spinner("📝 Gemini генерирует конспект и диаграмму…"):
+    with st.spinner("Подготовка материала..."):
         st.session_state.summary_data = generate_summary_and_diagram(
             new_topic, lang, level
         )
 
     n_q = st.session_state.summary_data.get("quiz_count_hint", 5)
-    with st.spinner(f"🧠 GPT строит квиз ({n_q} вопросов) и задачи…"):
+    with st.spinner("Подготовка визуализации..."):
         st.session_state.lesson_data = generate_quiz_and_practice(
             new_topic, lang, level, n_q
         )
 
     if deep_mode:
-        with st.spinner("🔬 GPT-4o ищет реальные задачи…"):
+        with st.spinner("Обработка данных..."):
             st.session_state.deep_research_md = deep_research(new_topic, lang)
 
 
@@ -499,7 +590,7 @@ if st.session_state.summary_data and st.session_state.current_topic:
             st.success("✅ Отлично! Конспект, квиз и задачи открыты.")
 
     # ══════════════════════════════════════════════════════════════
-    #  TAB 2 — SUMMARY + DIAGRAM  (locked until gate)
+    #  TAB 2 — SUMMARY + DIAGRAM + IMAGES  (locked until gate)
     # ══════════════════════════════════════════════════════════════
     with tab_summary:
         if not st.session_state.video_confirmed:
@@ -522,13 +613,27 @@ if st.session_state.summary_data and st.session_state.current_topic:
             st.markdown(summary_md)
             st.markdown("</div>", unsafe_allow_html=True)
 
-            # Mermaid diagram
+            # ── Illustrative images ───────────────────────────────
+            image_urls = summary.get("image_urls", [])
+            if image_urls:
+                st.markdown("")
+                st.markdown("#### 🖼️ Иллюстрации по теме")
+                img_cols = st.columns(min(len(image_urls), 3))
+                for idx, img_url in enumerate(image_urls[:3]):
+                    with img_cols[idx]:
+                        try:
+                            st.image(img_url, use_container_width=True)
+                        except Exception:
+                            # Silently skip broken URLs
+                            pass
+
+            # ── Mermaid diagram — rendered, no raw code shown ─────
             mermaid_src = summary.get("mermaid", "")
             if mermaid_src:
                 st.markdown("")
                 st.markdown("#### 🗺️ Структурная диаграмма")
                 with st.expander("Показать / скрыть диаграмму", expanded=True):
-                    st.markdown(f"```mermaid\n{mermaid_src}\n```")
+                    render_mermaid(mermaid_src, height=420)
 
     # ══════════════════════════════════════════════════════════════
     #  TAB 3 — QUIZ  (locked until gate)
