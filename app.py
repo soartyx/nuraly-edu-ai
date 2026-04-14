@@ -166,7 +166,6 @@ def search_youtube(topic: str) -> str | None:
         except Exception as e:
             st.warning(f"Ошибка поиска видео: {e}")
             return None
-    st.warning("Все YouTube ключи исчерпаны.")
     return None
 
 # ══════════════════════════════════════════════════════════════════════
@@ -183,11 +182,7 @@ def get_image_search_queries(topic: str, language: str) -> list[str]:
                 "content": (
                     "You are a search assistant. Given an educational topic, "
                     "return ONLY valid JSON with 3 short English search queries "
-                    "to find real educational diagrams, schemes, or illustrations "
-                    "on Wikimedia Commons.\n"
-                    "Rules:\n"
-                    "- Queries must be in English\n"
-                    "- Target: diagrams, schemes, charts, illustrations\n"
+                    "to find real educational diagrams on Wikimedia Commons.\n"
                     'JSON schema: {"queries": ["query1", "query2", "query3"]}'
                 ),
             },
@@ -240,18 +235,13 @@ def fetch_topic_images(topic: str, language: str) -> list[dict]:
     return results
 
 def render_topic_images(images: list[dict]) -> None:
-    if not images:
-        st.info("Иллюстрации по теме не найдены.")
-        return
+    if not images: return
     st.markdown("#### Иллюстрации по теме")
     cols = st.columns(len(images))
     for col, img in zip(cols, images):
         with col:
-            try:
-                st.image(img["url"], use_container_width=True)
-                st.caption(f" {img['caption']}")
-            except Exception:
-                st.markdown(f"[Открыть иллюстрацию]({img['url']})")
+            st.image(img["url"], use_container_width=True)
+            st.caption(f" {img['caption']}")
 
 # ══════════════════════════════════════════════════════════════════════
 # LANGUAGE DETECTION
@@ -262,10 +252,7 @@ def detect_language(topic: str) -> str:
     resp = oai.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {
-                "role": "system",
-                "content": 'Detect language. Return ONLY JSON: {"language": "English name"}',
-            },
+            {"role": "system", "content": 'Detect language. Return JSON: {"language": "English name"}'},
             {"role": "user", "content": topic},
         ],
         temperature=0.1,
@@ -281,11 +268,8 @@ def detect_language(topic: str) -> str:
 def generate_summary(topic: str, language: str, level: str) -> dict:
     oai = get_openai()
     system = (
-        f"You are an expert educator. Output language: {language}. Difficulty: {level}. "
-        "Return ONLY JSON. Rules: "
-        "- Summary: rich markdown, 3-4 ## headers, LaTeX via $...$ or $$...$$ only. "
-        "- keywords: list. - quiz_count_hint: int 3-10. "
-        'JSON schema: {"summary": "...", "keywords": [], "quiz_count_hint": 5}'
+        f"Expert educator. Language: {language}. Level: {level}. Return ONLY JSON. "
+        'Schema: {"summary": "rich markdown with LaTeX $", "keywords": [], "quiz_count_hint": 5}'
     )
     resp = oai.chat.completions.create(
         model="gpt-4o-mini",
@@ -304,11 +288,12 @@ def generate_summary(topic: str, language: str, level: str) -> dict:
 @st.cache_data(show_spinner=False)
 def generate_quiz_and_practice(topic: str, language: str, level: str, n_questions: int) -> dict:
     oai = get_openai()
-    system = (
-        f"Expert educator. Language: {language}. Level: {level}. Return ONLY JSON. "
-        f"Schema: " + '{"quiz":[{"question":"...","options":[],"answer_index":0,"explanation":"..."}],'
-        '"problems":[],"solution":{"problem":"...","steps":[],"answer":"..."}}'
+    schema = (
+        '{"quiz":[{"question":"","options":[],"answer_index":0,"explanation":""}],'
+        '"problems":[{"title":"","body":"","difficulty":""}],'
+        '"solution":{"problem":"","steps":[],"answer":""}}'
     )
+    system = f"Expert educator. Language: {language}. Level: {level}. Return ONLY JSON. Schema: {schema}"
     resp = oai.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
@@ -329,10 +314,7 @@ def deep_research(topic: str, language: str) -> str:
     resp = oai.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {
-                "role": "system",
-                "content": f"Research assistant. Output language: {language}. Find 3 problems from sources, step-by-step solutions, LaTeX formulas.",
-            },
+            {"role": "system", "content": f"Research assistant. Language: {language}. 3 real-world problems with solutions."},
             {"role": "user", "content": f"Topic: {topic}"},
         ],
         temperature=0.4,
@@ -340,142 +322,63 @@ def deep_research(topic: str, language: str) -> str:
     return resp.choices[0].message.content
 
 # ══════════════════════════════════════════════════════════════════════
-# SESSION STATE
+# SESSION STATE & UI
 # ══════════════════════════════════════════════════════════════════════
-DEFAULTS: dict = {
-    "current_topic": "",
-    "detected_language": "Russian",
-    "video_url": None,
-    "summary_data": None,
-    "lesson_data": None,
-    "topic_images": None,
-    "deep_research_md": None,
-    "video_confirmed": False,
-    "quiz_answers": {},
-    "quiz_submitted": False,
-}
-for _k, _v in DEFAULTS.items():
-    if _k not in st.session_state:
-        st.session_state[_k] = _v
+DEFAULTS = {"current_topic": "", "detected_language": "Russian", "video_url": None, 
+            "summary_data": None, "lesson_data": None, "topic_images": None, 
+            "deep_research_md": None, "video_confirmed": False, "quiz_answers": {}, "quiz_submitted": False}
 
-# ══════════════════════════════════════════════════════════════════════
-# HEADER
-# ══════════════════════════════════════════════════════════════════════
-st.markdown("""
-<div class="edu-header">
-<h1> EduSearch</h1>
-<p>Умные уроки · видео · интерактивный квиз · практические задачи</p>
-</div>
-""", unsafe_allow_html=True)
+for k, v in DEFAULTS.items():
+    if k not in st.session_state: st.session_state[k] = v
 
-# ══════════════════════════════════════════════════════════════════════
-# SEARCH BAR + OPTIONS
-# ══════════════════════════════════════════════════════════════════════
+st.markdown('<div class="edu-header"><h1> EduSearch</h1><p>Умные уроки</p></div>', unsafe_allow_html=True)
+
 col_input, col_btn = st.columns([5, 1])
 with col_input:
-    topic_input = st.text_input("Тема урока", placeholder="Введи тему...", label_visibility="collapsed", key="topic_input")
+    topic_input = st.text_input("Тема", placeholder="Введи тему...", label_visibility="collapsed")
 with col_btn:
     go = st.button("Go →", type="primary", use_container_width=True)
 
 opt_col1, opt_col2 = st.columns(2)
-with opt_col1:
-    level = st.selectbox("Уровень сложности", ["Новичок", "Профи"], index=0, key="level_select")
-with opt_col2:
-    deep_mode = st.checkbox(" Deep Research", value=False, key="deep_mode")
+with opt_col1: level = st.selectbox("Сложность", ["Новичок", "Профи"], key="level_select")
+with opt_col2: deep_mode = st.checkbox(" Deep Research", key="deep_mode")
 
 if go and topic_input.strip():
     new_topic = topic_input.strip()
     if new_topic != st.session_state.current_topic:
-        for _k, _v in DEFAULTS.items(): st.session_state[_k] = _v
+        for k, v in DEFAULTS.items(): st.session_state[k] = v
         st.session_state.current_topic = new_topic
-        with st.spinner(" Определяю язык..."):
-            lang = detect_language(new_topic)
-            st.session_state.detected_language = lang
-        with st.spinner(" Ищу видео..."):
-            st.session_state.video_url = search_youtube(new_topic)
-        with st.spinner(" Составляю конспект..."):
-            st.session_state.summary_data = generate_summary(new_topic, lang, level)
-        with st.spinner(" Ищу иллюстрации..."):
-            st.session_state.topic_images = fetch_topic_images(new_topic, lang)
+        st.session_state.detected_language = detect_language(new_topic)
+        st.session_state.video_url = search_youtube(new_topic)
+        st.session_state.summary_data = generate_summary(new_topic, st.session_state.detected_language, level)
+        st.session_state.topic_images = fetch_topic_images(new_topic, st.session_state.detected_language)
         n_q = st.session_state.summary_data.get("quiz_count_hint", 5)
-        with st.spinner(f" Строю квиз ({n_q})..."):
-            st.session_state.lesson_data = generate_quiz_and_practice(new_topic, lang, level, n_q)
-        if deep_mode:
-            with st.spinner(" Глубокий поиск..."):
-                st.session_state.deep_research_md = deep_research(new_topic, lang)
+        st.session_state.lesson_data = generate_quiz_and_practice(new_topic, st.session_state.detected_language, level, n_q)
+        if deep_mode: st.session_state.deep_research_md = deep_research(new_topic, st.session_state.detected_language)
 
-# ══════════════════════════════════════════════════════════════════════
-# RENDER
-# ══════════════════════════════════════════════════════════════════════
-if st.session_state.summary_data and st.session_state.current_topic:
-    topic = st.session_state.current_topic
-    lang = st.session_state.detected_language
-    level = st.session_state.get("level_select", "Новичок")
-    summary = st.session_state.summary_data
-    lesson = st.session_state.lesson_data or {}
-    images = st.session_state.topic_images or []
-
-    st.markdown(f'<div class="topic-pill"> {topic} &nbsp;·&nbsp; {lang} &nbsp;·&nbsp; {level}</div>', unsafe_allow_html=True)
-    tab_video, tab_summary, tab_quiz, tab_practice = st.tabs([" Видео", " Конспект", " Квиз", " Практика"])
-
-    with tab_video:
-        url = st.session_state.video_url
-        if url: st.video(url)
-        else: st.info("Видео не найдено.")
+if st.session_state.summary_data:
+    st.markdown(f'<div class="topic-pill"> {st.session_state.current_topic} &nbsp;·&nbsp; {st.session_state.detected_language} </div>', unsafe_allow_html=True)
+    tab_v, tab_s, tab_q, tab_p = st.tabs([" Видео", " Конспект", " Квиз", " Практика"])
+    
+    with tab_v:
+        if st.session_state.video_url: st.video(st.session_state.video_url)
         if not st.session_state.video_confirmed:
-            st.markdown('<div class="gate-card"><div class="gate-icon">👀</div><p>Посмотрел(а) видео?</p></div>', unsafe_allow_html=True)
-            if st.button(" Видео просмотрено — начать обучение!", type="primary", key="gate_btn"):
+            if st.button("Подтвердить просмотр"):
                 st.session_state.video_confirmed = True
                 st.rerun()
-        else: st.success(" Отлично! Конспект и квиз открыты.")
-
-    with tab_summary:
-        if not st.session_state.video_confirmed: st.info("Сначала подтвердите просмотр видео.")
-        else:
-            keywords = summary.get("keywords", [])
-            if keywords:
-                kw_html = "".join(f'<span class="key-concept">{k}</span>' for k in keywords)
-                st.markdown(f"**Ключевые понятия:** {kw_html}", unsafe_allow_html=True)
-            st.markdown(f'<div class="summary-box">{summary.get("summary", "")}</div>', unsafe_allow_html=True)
-            render_topic_images(images)
-
-    with tab_quiz:
-        if not st.session_state.video_confirmed: st.info("Сначала подтвердите просмотр видео.")
-        else:
-            quiz = lesson.get("quiz", [])
-            if quiz:
-                for i, q in enumerate(quiz):
-                    st.markdown(f'<p class="quiz-q-label">Вопрос {i + 1}</p>', unsafe_allow_html=True)
-                    st.markdown(q["question"])
-                    chosen = st.radio(f"q{i}", options=q["options"], index=None, label_visibility="collapsed", key=f"qz_{i}", disabled=st.session_state.quiz_submitted)
-                    if chosen is not None: st.session_state.quiz_answers[i] = chosen
-                if not st.session_state.quiz_submitted:
-                    if st.button("Отправить ответы", type="primary", disabled=len(st.session_state.quiz_answers) < len(quiz)):
-                        st.session_state.quiz_submitted = True
-                        st.rerun()
-                if st.session_state.quiz_submitted:
-                    score = 0
-                    for i, q in enumerate(quiz):
-                        correct = q["options"][q["answer_index"]]
-                        ans = st.session_state.quiz_answers.get(i)
-                        if ans == correct:
-                            score += 1
-                            st.markdown(f'<div class="result-correct">Q{i+1} ✓ {q["explanation"]}</div>', unsafe_allow_html=True)
-                        else:
-                            st.markdown(f'<div class="result-wrong">Q{i+1} ✗ Верно: {correct}. {q["explanation"]}</div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="score-box"><div class="score-num">{score}/{len(quiz)}</div></div>', unsafe_allow_html=True)
-
-    with tab_practice:
-        if not st.session_state.video_confirmed: st.info("Сначала подтвердите просмотр видео.")
-        else:
-            for i, p in enumerate(lesson.get("problems", [])):
-                st.markdown(f'<div class="practice-card"><div class="practice-num">Задача {i+1}</div>{p["title"]}</div>', unsafe_allow_html=True)
-                st.markdown(p["body"])
-            sol = lesson.get("solution", {})
-            if sol:
-                with st.expander("Показать решение"):
-                    st.markdown(sol["problem"])
-                    for i, step in enumerate(sol.get("steps", [])):
-                        st.markdown(f'<div class="solution-step"><div class="step-num">{i+1}</div><div class="step-content">{step}</div></div>', unsafe_allow_html=True)
-            if st.session_state.deep_research_md:
-                with st.expander("Deep Research"): st.markdown(st.session_state.deep_research_md)
+    with tab_s:
+        if st.session_state.video_confirmed:
+            st.markdown(f'<div class="summary-box">{st.session_state.summary_data.get("summary")}</div>', unsafe_allow_html=True)
+            render_topic_images(st.session_state.topic_images)
+    with tab_q:
+        if st.session_state.video_confirmed:
+            quiz = st.session_state.lesson_data.get("quiz", [])
+            for i, q in enumerate(quiz):
+                st.markdown(q["question"])
+                ans = st.radio(f"Вопрос {i+1}", q["options"], key=f"q_{i}")
+                st.session_state.quiz_answers[i] = ans
+            if st.button("Сдать"): st.session_state.quiz_submitted = True
+    with tab_p:
+        if st.session_state.video_confirmed:
+            for p in st.session_state.lesson_data.get("problems", []):
+                st.markdown(f"**{p['title']}**\n\n{p['body']}")
