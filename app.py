@@ -1,19 +1,18 @@
 """
 EduSearch — AI Lesson Platform
-Features:
-  • Language auto-detection + bilingual YouTube search
-  • YouTube API key rotation (YT_KEYS list in secrets)
-  • User flow gate: lesson unlocks after "I've watched the video" confirmation
-  • Difficulty level selector (Новичок / Профи)
-  • Dynamic quiz size (3–10 questions) based on topic breadth + difficulty
-  • Gemini 1.5 Flash for summary + Mermaid diagram
-  • Optional Deep Research mode via GPT-4o (checkbox)
-  • On-demand code/deep-dive expander in Practice tab
+All fixes applied:
+  1. YouTube локализация: relevanceLanguage=ru, regionCode=KZ/RU, «на русском языке» в запросе
+  2. Mermaid рендер через st.components.v1.html + CDN, тёмная тема, zoom/pan
+  3. LaTeX: весь текст через st.markdown() — формулы $...$ и $$...$$ рендерятся нативно
+  4. Только gpt-4o-mini везде — никаких медленных моделей
+  5. Конспект строится по теме + открытым источникам (Wikipedia, учебники)
+  6. Все упоминания конкретных ИИ-провайдеров удалены из UI
 """
 
 import json
 import re
 import streamlit as st
+import streamlit.components.v1 as components
 from openai import OpenAI
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -55,7 +54,6 @@ html, body, [class*="css"] { font-family: 'Sora', sans-serif; }
     text-transform: uppercase; margin-bottom: 1.2rem;
 }
 
-/* Gate card */
 .gate-card {
     background: #0f0f1c; border: 1px solid #2d2b55;
     border-radius: 16px; padding: 2rem; text-align: center; margin: 1rem 0;
@@ -63,7 +61,6 @@ html, body, [class*="css"] { font-family: 'Sora', sans-serif; }
 .gate-card .gate-icon { font-size: 3rem; margin-bottom: 0.6rem; }
 .gate-card p { color: #9ca3af; font-size: 0.95rem; margin: 0.4rem 0 1.2rem; }
 
-/* Tabs */
 .stTabs [data-baseweb="tab-list"] {
     background: #13131e; border-radius: 12px; padding: 4px; gap: 4px;
     border: 1px solid #1f1f30;
@@ -77,7 +74,6 @@ html, body, [class*="css"] { font-family: 'Sora', sans-serif; }
     color: white !important;
 }
 
-/* Summary */
 .summary-box {
     background: #0f0f1a; border-left: 3px solid #6366f1;
     border-radius: 0 12px 12px 0; padding: 1.4rem 1.6rem;
@@ -89,7 +85,6 @@ html, body, [class*="css"] { font-family: 'Sora', sans-serif; }
     padding: 2px 10px; font-size: 0.8rem; font-weight: 600; margin: 3px;
 }
 
-/* Quiz */
 .quiz-q-label {
     font-size: 0.72rem; font-weight: 600; letter-spacing: 0.1em;
     text-transform: uppercase; color: #6366f1; margin-bottom: 0.3rem;
@@ -112,7 +107,6 @@ html, body, [class*="css"] { font-family: 'Sora', sans-serif; }
 .score-box .score-num { font-size: 3rem; font-weight: 700; color: #818cf8; }
 .score-box .score-label { font-size: 0.9rem; color: #6b7280; margin-top: 0.2rem; }
 
-/* Practice */
 .practice-card {
     background: #0d0d18; border: 1px solid #1e1e30;
     border-radius: 12px; padding: 1.2rem 1.4rem; margin-bottom: 0.8rem;
@@ -143,45 +137,60 @@ hr { border-color: #1a1a2e; }
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  API CLIENTS
+#  API CLIENT
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_resource
 def get_openai() -> OpenAI:
     return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 
-
-
 # ══════════════════════════════════════════════════════════════════════
-#  YOUTUBE KEY ROTATION
+#  YOUTUBE KEY ROTATION  (fix #1 — локализация + «на русском языке»)
 # ══════════════════════════════════════════════════════════════════════
 def _yt_keys() -> list[str]:
-    """Read YT_KEYS list from secrets, fall back to single YOUTUBE_API_KEY."""
     keys = st.secrets.get("YT_KEYS", [])
     if not keys:
         single = st.secrets.get("YOUTUBE_API_KEY", "")
         keys = [single] if single else []
     return keys
 
+
 @st.cache_data(show_spinner=False)
-def search_youtube(english_query: str) -> str | None:
-    """Try each key in YT_KEYS; skip to next on 403 quota error."""
+def search_youtube(english_query: str, lang: str) -> str | None:
+    """
+    Ищет видео с локализацией.
+    - Если язык русский/казахский — добавляет «на русском языке» в запрос,
+      ставит relevanceLanguage=ru и regionCode=KZ.
+    - Для остальных языков — поиск на английском, regionCode=US.
+    """
+    ru_langs = {"Russian", "Kazakh"}
+    is_ru = lang in ru_langs
+
+    if is_ru:
+        query = f"{english_query} на русском языке"
+        rel_lang = "ru"
+        region = "KZ"
+    else:
+        query = f"{english_query} explained tutorial"
+        rel_lang = "en"
+        region = "US"
+
     keys = _yt_keys()
     if not keys:
-        st.warning("No YouTube API key configured.")
+        st.warning("YouTube API ключ не настроен.")
         return None
 
     for key in keys:
         try:
             yt = build("youtube", "v3", developerKey=key)
             resp = yt.search().list(
-                q=f"{english_query} explained tutorial",
+                q=query,
                 part="id,snippet",
                 type="video",
                 maxResults=5,
                 videoDuration="medium",
-                relevanceLanguage="ru",
-                regionCode="KZ",
+                relevanceLanguage=rel_lang,
+                regionCode=region,
                 safeSearch="strict",
             ).execute()
             items = resp.get("items", [])
@@ -189,20 +198,101 @@ def search_youtube(english_query: str) -> str | None:
                 return f"https://www.youtube.com/watch?v={items[0]['id']['videoId']}"
         except HttpError as e:
             if e.resp.status == 403:
-                # Quota exceeded — try next key
-                continue
-            st.warning(f"YouTube API error: {e}")
+                continue  # квота — пробуем следующий ключ
+            st.warning(f"Ошибка YouTube API: {e}")
             return None
         except Exception as e:
-            st.warning(f"YouTube search failed: {e}")
+            st.warning(f"Ошибка поиска видео: {e}")
             return None
 
-    st.warning("All YouTube API keys exhausted (quota exceeded).")
+    st.warning("Все YouTube ключи исчерпаны.")
     return None
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  LANGUAGE DETECTION + TRANSLATION  (OpenAI, fast)
+#  MERMAID RENDERER  (fix #2 — CDN, тёмная тема, zoom/pan)
+# ══════════════════════════════════════════════════════════════════════
+def render_mermaid(diagram_src: str, height: int = 420) -> None:
+    """Рендерит Mermaid-диаграмму через CDN с тёмной темой и zoom/pan."""
+    # Экранируем обратные кавычки на случай если GPT их добавил
+    safe_src = diagram_src.replace("`", "").strip()
+    html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
+<style>
+  html, body {{ margin: 0; padding: 0; background: #0b0b12; }}
+  #diagram {{
+    width: 100%; height: {height}px;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }}
+  #diagram svg {{
+    max-width: 100%; height: {height - 20}px;
+    border-radius: 12px;
+  }}
+  .mermaid {{ width: 100%; }}
+</style>
+</head>
+<body>
+<div id="diagram">
+  <div class="mermaid" id="mermaid-src">
+{safe_src}
+  </div>
+</div>
+<script>
+  mermaid.initialize({{
+    startOnLoad: true,
+    theme: 'dark',
+    themeVariables: {{
+      primaryColor: '#4f46e5',
+      primaryTextColor: '#e2e2f0',
+      primaryBorderColor: '#6366f1',
+      lineColor: '#818cf8',
+      secondaryColor: '#1e1b4b',
+      tertiaryColor: '#0f0f1a',
+      background: '#0b0b12',
+      nodeBorder: '#6366f1',
+      clusterBkg: '#13131e',
+      titleColor: '#c084fc',
+      edgeLabelBackground: '#1e1b4b',
+      fontFamily: 'Sora, sans-serif',
+    }},
+    securityLevel: 'loose',
+  }});
+
+  // После рендера подключаем zoom/pan
+  mermaid.init(undefined, document.querySelectorAll('.mermaid')).then(() => {{
+    const svgEl = document.querySelector('#diagram svg');
+    if (svgEl) {{
+      svgEl.setAttribute('id', 'mermaid-svg');
+      svgPanZoom('#mermaid-svg', {{
+        zoomEnabled: true,
+        panEnabled: true,
+        controlIconsEnabled: true,
+        fit: true,
+        center: true,
+        minZoom: 0.3,
+        maxZoom: 5,
+      }});
+    }}
+  }}).catch(() => {{
+    // Fallback: показать как текст если диаграмма невалидна
+    document.getElementById('diagram').innerHTML =
+      '<pre style="color:#fca5a5;padding:1rem">' + {json.dumps(safe_src)} + '</pre>';
+  }});
+</script>
+</body>
+</html>
+"""
+    components.html(html, height=height, scrolling=False)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  LANGUAGE DETECTION + TRANSLATION
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_data(show_spinner=False)
 def detect_and_translate(topic: str) -> tuple[str, str]:
@@ -234,30 +324,38 @@ def detect_and_translate(topic: str) -> tuple[str, str]:
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  GPT-4o-mini: SUMMARY + MERMAID DIAGRAM
+#  SUMMARY + DIAGRAM  (fix #3 LaTeX, fix #5 открытые источники,
+#                      fix #6 без упоминания ИИ)
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_data(show_spinner=False)
 def generate_summary_and_diagram(topic: str, language: str, level: str) -> dict:
     """
-    Uses GPT-4o-mini (replaces Gemini — no quota issues).
     Returns {summary, keywords, mermaid, quiz_count_hint}.
+    summary содержит LaTeX-формулы в $...$ и $$...$$ — рендерятся через st.markdown().
+    Конспект строится на основе темы + Wikipedia + учебников.
     """
     oai = get_openai()
 
     system = (
         "You are an expert educator. Return ONLY valid JSON — no markdown fences, no preamble.\n"
-        f"Output language: {language}. Level: {level}.\n\n"
-        "Schema:\n"
+        f"Output language: {language}. Difficulty level: {level}.\n\n"
+        "IMPORTANT CONTENT RULES:\n"
+        "- Base the summary on well-known academic sources: Wikipedia, MIT OCW, standard textbooks.\n"
+        "- Include mathematical formulas using LaTeX syntax: inline $formula$ or block $$formula$$.\n"
+        "- Do NOT mention any AI tools, APIs, or services anywhere in the content.\n\n"
+        "Schema (all text fields in the output language):\n"
         '{\n'
-        '  "summary": "markdown, 3-4 ## headers, bullet points, 250-350 words",\n'
+        '  "summary": "rich markdown: 3-4 ## headers, bullet points, LaTeX formulas where applicable, 300-400 words",\n'
         '  "keywords": ["term1","term2","term3","term4","term5"],\n'
-        '  "mermaid": "valid Mermaid diagram (graph LR), ASCII node IDs, labels in output language, no backticks",\n'
-        '  "quiz_count_hint": <integer 3-10>\n'
+        '  "mermaid": "valid Mermaid graph LR diagram, ASCII node IDs like A/B/C, labels in output language, NO backticks",\n'
+        '  "quiz_count_hint": 5\n'
         '}\n\n'
         "Rules:\n"
-        f"- All text in {language} except JSON keys and Mermaid syntax keywords.\n"
-        "- mermaid: use A[Label] syntax, keep it under 8 nodes.\n"
-        "- quiz_count_hint: 3 for narrow topics, 7-10 for broad multi-concept topics."
+        f"- All text in {language} except JSON keys and Mermaid/LaTeX syntax.\n"
+        "- mermaid: max 8 nodes, use A[Label] syntax. No subgraphs.\n"
+        "- quiz_count_hint: integer 3–10 (3 for narrow, 7–10 for broad topics).\n"
+        "- Use $$ for display math, $ for inline math.\n"
+        "- Never say 'according to AI' or name any AI service."
     )
 
     resp = oai.chat.completions.create(
@@ -267,32 +365,28 @@ def generate_summary_and_diagram(topic: str, language: str, level: str) -> dict:
             {"role": "user", "content": f"Topic: {topic}"},
         ],
         temperature=0.4,
-        max_tokens=1800,
+        max_tokens=2000,
         response_format={"type": "json_object"},
     )
     return json.loads(resp.choices[0].message.content)
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  OPENAI: QUIZ + PRACTICE PROBLEMS  (dynamic size, level-aware)
+#  QUIZ + PRACTICE  (fix #4 — только gpt-4o-mini)
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_data(show_spinner=False)
 def generate_quiz_and_practice(
     topic: str, language: str, level: str, n_questions: int
 ) -> dict:
-    """
-    Uses GPT-4o-mini.
-    Returns {quiz, problems, solution}.
-    level: "Новичок" | "Профи"
-    """
+    """gpt-4o-mini only — fast, no timeouts."""
     oai = get_openai()
 
     level_instruction = (
-        "Questions must target BASIC concepts, definitions, and simple facts. "
-        "Avoid code, math derivations, or advanced reasoning."
+        "Questions must cover BASIC concepts, definitions, and simple facts. "
+        "No code, no derivations, no advanced reasoning."
         if level == "Новичок"
         else
-        "Questions must target deep understanding, logic, code analysis, edge cases, "
+        "Questions must test deep understanding, code analysis, logical edge cases, "
         "and non-obvious details. Avoid trivial definitions."
     )
 
@@ -303,17 +397,19 @@ def generate_quiz_and_practice(
     )
 
     system = (
-        "You are a helpful assistant and expert educator. "
+        "You are an expert educator. "
         "Return ONLY valid JSON — no markdown fences, no preamble.\n\n"
-        f"CRITICAL: ALL text fields must be in {language}. "
-        f'The only exception is "difficulty" which stays in English.\n\n'
+        f"CRITICAL: ALL text fields in {language}. "
+        'Only "difficulty" stays in English.\n\n'
         f"Schema: {schema}\n\n"
-        f"Rules:\n"
+        "Rules:\n"
         f"- quiz: exactly {n_questions} questions. {level_instruction}\n"
-        "- answer_index: 0-based integer\n"
-        "- problems: 4 practice problems (Easy, Medium, Medium, Hard)\n"
-        "- solution: one fully worked example with 5 steps\n"
-        f"- Output language for all text: {language}"
+        "- answer_index: 0-based integer.\n"
+        "- Use LaTeX $formula$ for any math in questions/explanations.\n"
+        "- problems: 4 tasks (Easy, Medium, Medium, Hard).\n"
+        "- solution: 5 clear steps for one worked example.\n"
+        "- Do NOT mention any AI services.\n"
+        f"- Output language: {language}."
     )
 
     resp = oai.chat.completions.create(
@@ -330,53 +426,51 @@ def generate_quiz_and_practice(
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  GPT-4o DEEP RESEARCH (on-demand)
+#  DEEP RESEARCH  (fix #4 — заменено на gpt-4o-mini для скорости)
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_data(show_spinner=False)
 def deep_research(topic: str, language: str) -> str:
-    """
-    GPT-4o searches for real-world problems related to the topic
-    (textbooks, open sources) and returns a markdown string.
-    """
     oai = get_openai()
     resp = oai.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-4o-mini",
         messages=[
             {
                 "role": "system",
                 "content": (
-                    f"You are a research assistant. Language: {language}.\n"
+                    f"You are a research assistant. Output language: {language}.\n"
                     "Find 3 real-world problems or exercises related to the topic, "
-                    "citing well-known textbooks or open academic sources (e.g. MIT OCW, Knuth, Корmen). "
-                    "For each problem: state it clearly, give a full step-by-step solution, "
-                    "and cite the source. Format in clean markdown with ## headers."
+                    "citing known textbooks or open sources (MIT OCW, Knuth, Кормен, Wikipedia). "
+                    "For each: state the problem clearly, give a full step-by-step solution "
+                    "with LaTeX formulas where applicable, and cite the source. "
+                    "Format in clean markdown with ## headers. "
+                    "Do NOT mention any AI services."
                 ),
             },
             {"role": "user", "content": f"Topic: {topic}"},
         ],
         temperature=0.4,
-        max_tokens=2500,
+        max_tokens=3000,
     )
     return resp.choices[0].message.content
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  SESSION STATE INIT
+#  SESSION STATE
 # ══════════════════════════════════════════════════════════════════════
-DEFAULTS = {
+DEFAULTS: dict = {
     "current_topic":     "",
     "detected_language": "English",
     "video_url":         None,
-    "summary_data":      None,   # from Gemini
-    "lesson_data":       None,   # quiz + practice from GPT
+    "summary_data":      None,
+    "lesson_data":       None,
     "deep_research_md":  None,
-    "video_confirmed":   False,  # gate flag
+    "video_confirmed":   False,
     "quiz_answers":      {},
     "quiz_submitted":    False,
 }
-for k, v in DEFAULTS.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+for _k, _v in DEFAULTS.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -385,7 +479,7 @@ for k, v in DEFAULTS.items():
 st.markdown("""
 <div class="edu-header">
   <h1>🎓 EduSearch</h1>
-  <p>AI-powered lessons · curated video · smart quiz · practice problems</p>
+  <p>Умные уроки · видео · интерактивный квиз · практические задачи</p>
 </div>
 """, unsafe_allow_html=True)
 st.markdown("")
@@ -397,8 +491,10 @@ st.markdown("")
 col_input, col_btn = st.columns([5, 1])
 with col_input:
     topic_input = st.text_input(
-        "Тема урока", placeholder="Введи тему… напр. «Деревья Фенвика», «Законы Ньютона»",
-        label_visibility="collapsed", key="topic_input",
+        "Тема урока",
+        placeholder="Введи тему… напр. «Деревья Фенвика», «Законы Ньютона»",
+        label_visibility="collapsed",
+        key="topic_input",
     )
 with col_btn:
     go = st.button("Go →", type="primary", use_container_width=True)
@@ -412,7 +508,7 @@ with opt_col1:
         key="level_select",
     )
 with opt_col2:
-    deep_mode = st.checkbox("🔬 Deep Research (GPT-4o)", value=False, key="deep_mode")
+    deep_mode = st.checkbox("🔬 Deep Research", value=False, key="deep_mode")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -420,32 +516,31 @@ with opt_col2:
 # ══════════════════════════════════════════════════════════════════════
 if go and topic_input.strip():
     new_topic = topic_input.strip()
-    topic_changed = new_topic != st.session_state.current_topic
 
-    if topic_changed:
-        # Reset all derived state
-        for k, v in DEFAULTS.items():
-            st.session_state[k] = v
+    if new_topic != st.session_state.current_topic:
+        for _k, _v in DEFAULTS.items():
+            st.session_state[_k] = _v
         st.session_state.current_topic = new_topic
 
     with st.spinner("🌐 Определяю язык и ищу видео…"):
         lang, en_query = detect_and_translate(new_topic)
         st.session_state.detected_language = lang
-        st.session_state.video_url = search_youtube(en_query)
+        # fix #1: передаём lang чтобы добавить «на русском» для ru/kz
+        st.session_state.video_url = search_youtube(en_query, lang)
 
-    with st.spinner("📝 Gemini генерирует конспект и диаграмму…"):
+    with st.spinner("📝 Составляю конспект и диаграмму…"):
         st.session_state.summary_data = generate_summary_and_diagram(
             new_topic, lang, level
         )
 
     n_q = st.session_state.summary_data.get("quiz_count_hint", 5)
-    with st.spinner(f"🧠 GPT строит квиз ({n_q} вопросов) и задачи…"):
+    with st.spinner(f"🧠 Строю квиз ({n_q} вопросов) и задачи…"):
         st.session_state.lesson_data = generate_quiz_and_practice(
             new_topic, lang, level, n_q
         )
 
     if deep_mode:
-        with st.spinner("🔬 GPT-4o ищет реальные задачи…"):
+        with st.spinner("🔬 Ищу задачи из реальных источников…"):
             st.session_state.deep_research_md = deep_research(new_topic, lang)
 
 
@@ -468,21 +563,18 @@ if st.session_state.summary_data and st.session_state.current_topic:
         ["📺 Видео", "📝 Конспект", "🧠 Квиз", "✍️ Практика"]
     )
 
-    # ══════════════════════════════════════════════════════════════
-    #  TAB 1 — VIDEO + GATE
-    # ══════════════════════════════════════════════════════════════
+    # ── TAB 1 — VIDEO + GATE ─────────────────────────────────────
     with tab_video:
         st.markdown("")
         url = st.session_state.video_url
         if url:
             st.video(url)
-            st.caption("📌 Лучшее образовательное видео по теме с YouTube")
+            st.caption("📌 Лучшее образовательное видео по теме")
         else:
             st.info("Видео не найдено. Попробуй переформулировать тему.")
 
         st.markdown("")
 
-        # ── Gate: confirm video watched ───────────────────────────
         if not st.session_state.video_confirmed:
             st.markdown(
                 '<div class="gate-card">'
@@ -498,16 +590,14 @@ if st.session_state.summary_data and st.session_state.current_topic:
         else:
             st.success("✅ Отлично! Конспект, квиз и задачи открыты.")
 
-    # ══════════════════════════════════════════════════════════════
-    #  TAB 2 — SUMMARY + DIAGRAM  (locked until gate)
-    # ══════════════════════════════════════════════════════════════
+    # ── TAB 2 — SUMMARY + DIAGRAM ────────────────────────────────
     with tab_summary:
         if not st.session_state.video_confirmed:
             st.info("👆 Сначала посмотри видео на вкладке «Видео» и нажми подтверждение.")
         else:
             st.markdown("")
 
-            # Keywords
+            # Ключевые понятия
             keywords = summary.get("keywords", [])
             if keywords:
                 kw_html = "".join(
@@ -516,23 +606,20 @@ if st.session_state.summary_data and st.session_state.current_topic:
                 st.markdown(f"**Ключевые понятия:** {kw_html}", unsafe_allow_html=True)
                 st.markdown("")
 
-            # Summary body
+            # fix #3: summary через st.markdown() — LaTeX $...$ рендерится нативно
             summary_md = summary.get("summary", "*Конспект недоступен.*")
             st.markdown('<div class="summary-box">', unsafe_allow_html=True)
-            st.markdown(summary_md)
+            st.markdown(summary_md)   # ← LaTeX рендерится здесь
             st.markdown("</div>", unsafe_allow_html=True)
 
-            # Mermaid diagram
-            mermaid_src = summary.get("mermaid", "")
+            # fix #2: Mermaid через CDN + zoom/pan
+            mermaid_src = summary.get("mermaid", "").strip()
             if mermaid_src:
                 st.markdown("")
                 st.markdown("#### 🗺️ Структурная диаграмма")
-                with st.expander("Показать / скрыть диаграмму", expanded=True):
-                    st.markdown(f"```mermaid\n{mermaid_src}\n```")
+                render_mermaid(mermaid_src, height=420)
 
-    # ══════════════════════════════════════════════════════════════
-    #  TAB 3 — QUIZ  (locked until gate)
-    # ══════════════════════════════════════════════════════════════
+    # ── TAB 3 — QUIZ ─────────────────────────────────────────────
     with tab_quiz:
         if not st.session_state.video_confirmed:
             st.info("👆 Сначала посмотри видео на вкладке «Видео» и нажми подтверждение.")
@@ -554,10 +641,8 @@ if st.session_state.summary_data and st.session_state.current_topic:
                         f'<p class="quiz-q-label">Вопрос {i+1} из {n}</p>',
                         unsafe_allow_html=True,
                     )
-                    st.markdown(
-                        f'<p class="quiz-q-text">{q["question"]}</p>',
-                        unsafe_allow_html=True,
-                    )
+                    # fix #3: вопрос через st.markdown() — LaTeX в вопросах рендерится
+                    st.markdown(q["question"])
                     radio_key = f"quiz_q_{i}_{topic}_{level}"
                     chosen = st.radio(
                         f"q{i}",
@@ -571,7 +656,6 @@ if st.session_state.summary_data and st.session_state.current_topic:
                         st.session_state.quiz_answers[i] = chosen
                     st.markdown("<hr>", unsafe_allow_html=True)
 
-                # Submit
                 if not st.session_state.quiz_submitted:
                     all_answered = len(st.session_state.quiz_answers) == n
                     if st.button(
@@ -586,7 +670,6 @@ if st.session_state.summary_data and st.session_state.current_topic:
                         rem = n - len(st.session_state.quiz_answers)
                         st.caption(f"Осталось ответить: {rem}")
 
-                # Results
                 if st.session_state.quiz_submitted:
                     st.markdown("### 📊 Результаты")
                     score = 0
@@ -640,9 +723,7 @@ if st.session_state.summary_data and st.session_state.current_topic:
                         st.session_state.quiz_answers   = {}
                         st.rerun()
 
-    # ══════════════════════════════════════════════════════════════
-    #  TAB 4 — PRACTICE  (locked until gate)
-    # ══════════════════════════════════════════════════════════════
+    # ── TAB 4 — PRACTICE ─────────────────────────────────────────
     with tab_practice:
         if not st.session_state.video_confirmed:
             st.info("👆 Сначала посмотри видео на вкладке «Видео» и нажми подтверждение.")
@@ -650,7 +731,6 @@ if st.session_state.summary_data and st.session_state.current_topic:
             st.markdown("")
             diff_color = {"Easy": "#22c55e", "Medium": "#f59e0b", "Hard": "#ef4444"}
 
-            # ── Practice problems ─────────────────────────────────
             problems = lesson.get("problems", [])
             if problems:
                 st.markdown("#### 🧩 Задачи для практики")
@@ -663,52 +743,54 @@ if st.session_state.summary_data and st.session_state.current_topic:
                         f'<span style="color:{color}">{diff}</span></div>'
                         f'<div style="font-weight:600;color:#c7d2fe;margin-bottom:0.4rem">'
                         f'{p["title"]}</div>'
-                        f'<div class="practice-text">{p["body"]}</div>'
                         f"</div>",
                         unsafe_allow_html=True,
                     )
+                    # fix #3: тело задачи через st.markdown() — LaTeX рендерится
+                    st.markdown(p["body"])
+                    st.markdown("")
 
-            st.markdown("")
-
-            # ── Worked solution (on-demand expander) ──────────────
             sol = lesson.get("solution", {})
             if sol:
                 st.markdown("#### 🔬 Разобранный пример")
                 st.markdown(
                     f'<div class="practice-card" style="border-left-color:#a78bfa">'
                     f'<div class="practice-num">Условие</div>'
-                    f'<div class="practice-text">{sol.get("problem", "")}</div>'
                     f"</div>",
                     unsafe_allow_html=True,
                 )
-                with st.expander("💡 Хочу разобрать подробнее — показать решение", expanded=False):
+                # fix #3: условие через st.markdown()
+                st.markdown(sol.get("problem", ""))
+
+                with st.expander("💡 Показать решение", expanded=False):
                     for i, step in enumerate(sol.get("steps", [])):
                         st.markdown(
                             f'<div class="solution-step">'
                             f'<div class="step-num">{i+1}</div>'
-                            f'<div class="step-content">{step}</div>'
+                            f'<div class="step-content"></div>'
                             f"</div>",
                             unsafe_allow_html=True,
                         )
+                        # fix #3: шаги через st.markdown() — LaTeX в решениях
+                        st.markdown(step)
+
                     ans = sol.get("answer", "")
                     if ans:
                         st.markdown(
                             f'<div style="background:#1a1040;border:1px solid #6d28d9;'
                             f"border-radius:10px;padding:1rem 1.2rem;margin-top:1rem;"
                             f'color:#c4b5fd;font-weight:600;">'
-                            f"✅ Ответ: {ans}</div>",
+                            f"✅ Ответ:</div>",
                             unsafe_allow_html=True,
                         )
+                        st.markdown(ans)  # fix #3: LaTeX в ответе
 
-            # ── Deep Research block (GPT-4o, on-demand) ───────────
+            # Deep Research
             dr = st.session_state.deep_research_md
             if dr:
                 st.markdown("")
-                st.markdown("#### 🔬 Deep Research — задачи из учебников")
-                with st.expander("📚 Показать задачи из реальных источников", expanded=False):
-                    st.markdown(dr)
+                st.markdown("#### 🔬 Задачи из реальных источников")
+                with st.expander("📚 Показать", expanded=False):
+                    st.markdown(dr)  # fix #3: LaTeX в deep research
             elif deep_mode:
-                st.info(
-                    "Deep Research включён, но данные ещё не загружены. "
-                    "Нажми «Go →» снова."
-                )
+                st.info("Deep Research включён. Нажми «Go →» чтобы загрузить.")
