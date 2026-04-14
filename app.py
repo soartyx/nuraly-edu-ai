@@ -2,13 +2,15 @@
 EduSearch — AI Lesson Platform
 Fixes applied:
   1. YouTube: всегда «урок на русском» в запросе + relevanceLanguage=ru + regionCode=KZ
-  2. Mermaid: рендер через st.components.v1.html + CDN mermaid.js + zoom/pan
-  3. LaTeX: весь текст через st.markdown() — формулы $...$ и $$...$$ рендерятся нативно
+  2. Diagrams: Kroki.io вместо Mermaid CDN — ИИ генерирует Mermaid-код, рендерим через
+     https://kroki.io/mermaid/svg/BASE64 и вставляем как st.image()
+  3. LaTeX: системный промпт жёстко запрещает \( \) и \[ \] — только $...$ и $$...$$
   4. Только gpt-4o-mini везде
   5. Количество вопросов квиза динамическое (от темы), не фиксированное 5
   6. Убраны все ошибки с отступами
 """
 
+import base64
 import json
 import streamlit as st
 import streamlit.components.v1 as components
@@ -144,7 +146,7 @@ def get_openai() -> OpenAI:
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  YOUTUBE  — FIX #1: всегда «урок на русском» + ru локализация
+#  YOUTUBE  — всегда «урок на русском» + ru локализация
 # ══════════════════════════════════════════════════════════════════════
 def _yt_keys() -> list[str]:
     keys = st.secrets.get("YT_KEYS", [])
@@ -161,7 +163,6 @@ def search_youtube(topic: str) -> str | None:
     Запрос формируется как: «<тема> урок на русском»
     relevanceLanguage=ru, regionCode=KZ — YouTube отдаёт русские ролики.
     """
-    # ── FIX #1: жёстко добавляем «урок на русском» к любому запросу ──
     query = f"{topic} урок на русском"
 
     keys = _yt_keys()
@@ -178,8 +179,8 @@ def search_youtube(topic: str) -> str | None:
                 type="video",
                 maxResults=5,
                 videoDuration="medium",
-                relevanceLanguage="ru",   # FIX #1: всегда ru
-                regionCode="KZ",          # FIX #1: регион KZ (Казахстан/RU контент)
+                relevanceLanguage="ru",
+                regionCode="KZ",
                 safeSearch="strict",
             ).execute()
             items = resp.get("items", [])
@@ -187,7 +188,7 @@ def search_youtube(topic: str) -> str | None:
                 return f"https://www.youtube.com/watch?v={items[0]['id']['videoId']}"
         except HttpError as e:
             if e.resp.status == 403:
-                continue  # квота — пробуем следующий ключ
+                continue
             st.warning(f"Ошибка YouTube API: {e}")
             return None
         except Exception as e:
@@ -199,164 +200,41 @@ def search_youtube(topic: str) -> str | None:
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  MERMAID RENDERER — FIX #2: CDN mermaid.js + zoom/pan
+#  KROKI.IO DIAGRAM RENDERER — FIX #2
+#  ИИ генерирует чистый Mermaid-код → кодируем в base64 → Kroki рендерит SVG
+#  Вставляем как st.image() — никаких CDN-зависимостей, никаких parse error
 # ══════════════════════════════════════════════════════════════════════
-def render_mermaid(diagram_src: str, height: int = 460) -> None:
+def mermaid_to_kroki_url(diagram_src: str) -> str:
     """
-    Рендерит Mermaid-диаграмму через st.components.v1.html.
-    Подключает mermaid.js и svg-pan-zoom с CDN.
-    Поддерживает zoom колёсиком мыши и перетаскивание.
+    Конвертирует Mermaid-код в URL Kroki.io.
+    Kroki принимает base64url-encoded код и возвращает SVG.
     """
-    # Убираем случайные обратные кавычки, которые GPT иногда добавляет
-    safe_src = diagram_src.replace("`", "").strip()
+    # Убираем случайные обратные кавычки и лишние пробелы
+    clean_src = diagram_src.replace("`", "").strip()
+    # Кодируем в base64url (urlsafe, без паддинга)
+    encoded = base64.urlsafe_b64encode(clean_src.encode("utf-8")).decode("utf-8")
+    return f"https://kroki.io/mermaid/svg/{encoded}"
 
-    # Экранируем для безопасной вставки в JS-строку
-    safe_src_json = json.dumps(safe_src)
 
-    html_code = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<!-- FIX #2: mermaid.js через CDN -->
-<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
-<!-- FIX #2: svg-pan-zoom для zoom/pan -->
-<script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
-<style>
-  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  html, body {{
-    background: #0b0b12;
-    width: 100%;
-    height: {height}px;
-    overflow: hidden;
-  }}
-  #container {{
-    width: 100%;
-    height: {height}px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    overflow: hidden;
-  }}
-  #container svg {{
-    max-width: 100%;
-    max-height: {height - 10}px;
-    border-radius: 12px;
-  }}
-  /* Кнопки zoom от svg-pan-zoom */
-  .svg-pan-zoom-control {{
-    fill: #4f46e5 !important;
-    stroke: #818cf8 !important;
-  }}
-  .svg-pan-zoom-control-background {{
-    fill: #1e1b4b !important;
-    opacity: 0.85 !important;
-  }}
-  #error-box {{
-    display: none;
-    padding: 1rem;
-    color: #fca5a5;
-    background: #2d0a0a;
-    border: 1px solid #dc2626;
-    border-radius: 10px;
-    font-family: monospace;
-    font-size: 0.8rem;
-    white-space: pre-wrap;
-    word-break: break-all;
-    max-height: {height - 20}px;
-    overflow: auto;
-    width: 95%;
-  }}
-  #hint {{
-    position: absolute;
-    bottom: 8px;
-    right: 12px;
-    font-size: 0.7rem;
-    color: #4b5563;
-    font-family: 'Sora', sans-serif;
-    pointer-events: none;
-  }}
-</style>
-</head>
-<body>
-<div id="container">
-  <!-- FIX #2: диаграмма будет отрисована здесь -->
-  <div class="mermaid" id="mermaid-graph">{safe_src}</div>
-  <div id="error-box"></div>
-</div>
-<span id="hint">🖱 колесо = zoom · drag = pan</span>
+def render_diagram(diagram_src: str) -> None:
+    """
+    Рендерит диаграмму через Kroki.io и отображает через st.image().
+    Fallback: показывает сырой код если URL недоступен.
+    """
+    if not diagram_src or not diagram_src.strip():
+        return
 
-<script>
-  // FIX #2: инициализируем mermaid с тёмной темой
-  mermaid.initialize({{
-    startOnLoad: false,
-    theme: 'dark',
-    themeVariables: {{
-      primaryColor:        '#4f46e5',
-      primaryTextColor:    '#e2e2f0',
-      primaryBorderColor:  '#6366f1',
-      lineColor:           '#818cf8',
-      secondaryColor:      '#1e1b4b',
-      tertiaryColor:       '#0f0f1a',
-      background:          '#0b0b12',
-      nodeBorder:          '#6366f1',
-      clusterBkg:          '#13131e',
-      titleColor:          '#c084fc',
-      edgeLabelBackground: '#1e1b4b',
-      fontFamily:          'Sora, sans-serif',
-    }},
-    securityLevel: 'loose',
-  }});
+    url = mermaid_to_kroki_url(diagram_src)
 
-  async function renderDiagram() {{
-    const src = {safe_src_json};
-    const container = document.getElementById('container');
-    const errorBox  = document.getElementById('error-box');
-
-    try {{
-      // Рендерим SVG из Mermaid-кода
-      const {{ svg }} = await mermaid.render('mermaid-output', src);
-
-      // Вставляем SVG в контейнер
-      container.innerHTML = svg;
-      const svgEl = container.querySelector('svg');
-      if (!svgEl) return;
-
-      // Задаём размеры
-      svgEl.setAttribute('id', 'pan-zoom-svg');
-      svgEl.style.maxWidth  = '100%';
-      svgEl.style.maxHeight = ({height} - 10) + 'px';
-      svgEl.style.borderRadius = '12px';
-
-      // FIX #2: подключаем zoom/pan
-      svgPanZoom('#pan-zoom-svg', {{
-        zoomEnabled:         true,
-        panEnabled:          true,
-        controlIconsEnabled: true,   // кнопки +/- в углу
-        mouseWheelZoomEnabled: true, // колесо мыши
-        dblClickZoomEnabled: true,
-        fit:    true,
-        center: true,
-        minZoom: 0.2,
-        maxZoom: 8,
-        zoomScaleSensitivity: 0.3,
-      }});
-
-    }} catch (err) {{
-      // Fallback: показываем сырой код если диаграмма невалидна
-      container.querySelector('#mermaid-graph') &&
-        (container.querySelector('#mermaid-graph').style.display = 'none');
-      errorBox.style.display = 'block';
-      errorBox.textContent   = '⚠ Ошибка Mermaid:\\n' + err.message + '\\n\\n' + src;
-    }}
-  }}
-
-  renderDiagram();
-</script>
-</body>
-</html>"""
-
-    # FIX #2: рендерим через st.components.v1.html
-    components.html(html_code, height=height, scrolling=False)
+    # Показываем через st.image — Streamlit сам загружает SVG по URL
+    try:
+        st.image(url, use_container_width=True)
+        st.caption("🗺️ Диаграмма сгенерирована через [Kroki.io](https://kroki.io)")
+    except Exception:
+        # Fallback: показать ссылку и сырой код
+        st.markdown(f"[🔗 Открыть диаграмму]({url})")
+        with st.expander("📄 Исходный код Mermaid"):
+            st.code(diagram_src.replace("`", "").strip(), language="text")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -394,7 +272,10 @@ def detect_language(topic: str) -> str:
 def generate_summary_and_diagram(topic: str, language: str, level: str) -> dict:
     """
     Возвращает {summary, keywords, mermaid, quiz_count_hint}.
-    quiz_count_hint — динамическое число вопросов, зависит от широты темы (FIX #5).
+    quiz_count_hint — динамическое число вопросов, зависит от широты темы.
+
+    FIX #3 LaTeX: системный промпт жёстко запрещает \\( \\) и \\[ \\],
+    разрешены ТОЛЬКО $...$ и $$...$$.
     """
     oai = get_openai()
 
@@ -403,20 +284,28 @@ def generate_summary_and_diagram(topic: str, language: str, level: str) -> dict:
         f"Output language: {language}. Difficulty level: {level}.\n\n"
         "CONTENT RULES:\n"
         "- Base the summary on well-known academic sources: Wikipedia, MIT OCW, standard textbooks.\n"
-        "- Include mathematical formulas using LaTeX: inline $formula$ or block $$formula$$.\n"
+        # FIX #3: жёсткое требование по LaTeX-синтаксису
+        "- CRITICAL — LaTeX formatting rules (NEVER break these):\n"
+        "    * Inline math: $formula$ — e.g. $E = mc^2$\n"
+        "    * Block/display math: $$formula$$ — e.g. $$\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}$$\n"
+        "    * FORBIDDEN: \\( ... \\)  and  \\[ ... \\]  — never use these, they cause render errors.\n"
+        "    * FORBIDDEN: \\begin{equation} ... \\end{equation} — use $$ instead.\n"
         "- Do NOT mention any AI tools, APIs, or services.\n\n"
         "JSON schema (all text in the output language):\n"
         "{\n"
-        '  "summary": "rich markdown: 3-4 ## headers, bullets, LaTeX formulas, 300-400 words",\n'
+        '  "summary": "rich markdown: 3-4 ## headers, bullets, LaTeX via $...$ only, 300-400 words",\n'
         '  "keywords": ["term1","term2","term3","term4","term5"],\n'
-        '  "mermaid": "valid Mermaid graph LR — ASCII node IDs (A/B/C), labels in output language, NO backticks, max 8 nodes, A[Label] syntax, no subgraphs",\n'
+        # FIX #2: ИИ генерирует только чистый Mermaid-код (без фенсинга),
+        # мы сами построим Kroki-URL
+        '  "mermaid": "valid Mermaid graph LR — plain text only, NO backticks, NO ```mermaid fences, '
+        'ASCII node IDs (A/B/C), labels in output language, max 8 nodes, A[Label] syntax, no subgraphs",\n'
         "  \"quiz_count_hint\": <integer 3-10 based on topic breadth:\n"
         "    - narrow/single-concept topic (e.g. 'bubble sort') → 3-5\n"
         "    - medium topic (e.g. 'sorting algorithms') → 5-7\n"
         "    - broad topic (e.g. 'data structures') → 7-10>\n"
         "}\n\n"
         f"All text in {language} except JSON keys and Mermaid/LaTeX syntax.\n"
-        "Use $$ for display math, $ for inline math."
+        "Use $$ for display math, $ for inline math. NEVER use \\( \\) or \\[ \\]."
     )
 
     resp = oai.chat.completions.create(
@@ -433,15 +322,16 @@ def generate_summary_and_diagram(topic: str, language: str, level: str) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  QUIZ + PRACTICE  — FIX #5: n_questions динамический
+#  QUIZ + PRACTICE  — n_questions динамический
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_data(show_spinner=False)
 def generate_quiz_and_practice(
     topic: str, language: str, level: str, n_questions: int
 ) -> dict:
     """
-    n_questions передаётся из quiz_count_hint — всегда динамический,
-    не фиксированные 5 вопросов.
+    n_questions передаётся из quiz_count_hint — всегда динамический.
+
+    FIX #3 LaTeX: тот же запрет на \\( \\) и \\[ \\] в вопросах и объяснениях.
     """
     oai = get_openai()
 
@@ -473,7 +363,9 @@ def generate_quiz_and_practice(
         "Rules:\n"
         f"- quiz: EXACTLY {n_questions} questions (no more, no less). {level_instruction}\n"
         "- answer_index: 0-based integer.\n"
-        "- Use LaTeX $formula$ for any math in questions/explanations.\n"
+        # FIX #3: запрет \( \) и \[ \] в математике
+        "- CRITICAL — LaTeX math rules: use ONLY $formula$ (inline) or $$formula$$ (block).\n"
+        "  NEVER use \\( ... \\) or \\[ ... \\] — these cause render errors.\n"
         "- problems: 4 tasks (Easy, Medium, Medium, Hard).\n"
         "- solution: 5 clear steps for one worked example.\n"
         "- Do NOT mention any AI services.\n"
@@ -509,7 +401,8 @@ def deep_research(topic: str, language: str) -> str:
                     "Find 3 real-world problems or exercises related to the topic, "
                     "citing known textbooks or open sources (MIT OCW, Knuth, Кормен, Wikipedia). "
                     "For each: state the problem clearly, give a full step-by-step solution "
-                    "with LaTeX formulas where applicable, and cite the source. "
+                    "with LaTeX formulas where applicable ($...$ inline, $$...$$ block only — "
+                    "never use \\( \\) or \\[ \\]), and cite the source. "
                     "Format in clean markdown with ## headers. "
                     "Do NOT mention any AI services."
                 ),
@@ -595,7 +488,6 @@ if go and topic_input.strip():
         lang = detect_language(new_topic)
         st.session_state.detected_language = lang
 
-    # FIX #1: передаём тему напрямую — «урок на русском» добавляется внутри search_youtube
     with st.spinner("🎬 Ищу видео на русском языке…"):
         st.session_state.video_url = search_youtube(new_topic)
 
@@ -604,7 +496,7 @@ if go and topic_input.strip():
             new_topic, lang, level
         )
 
-    # FIX #5: quiz_count_hint — динамическое, зависит от темы
+    # quiz_count_hint — динамическое, зависит от темы
     n_q = st.session_state.summary_data.get("quiz_count_hint", 5)
     with st.spinner(f"🧠 Строю квиз ({n_q} вопросов) и задачи…"):
         st.session_state.lesson_data = generate_quiz_and_practice(
@@ -617,7 +509,7 @@ if go and topic_input.strip():
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  RENDER — FIX #3: правильные отступы во всех блоках
+#  RENDER
 # ══════════════════════════════════════════════════════════════════════
 if st.session_state.summary_data and st.session_state.current_topic:
     topic   = st.session_state.current_topic
@@ -635,7 +527,7 @@ if st.session_state.summary_data and st.session_state.current_topic:
         ["📺 Видео", "📝 Конспект", "🧠 Квиз", "✍️ Практика"]
     )
 
-    # ── TAB 1 — VIDEO ────────────────────────────────────────────
+    # ── TAB 1 — VIDEO ────────────────────────────────────────────────
     with tab_video:
         st.markdown("")
         url = st.session_state.video_url
@@ -665,7 +557,7 @@ if st.session_state.summary_data and st.session_state.current_topic:
         else:
             st.success("✅ Отлично! Конспект, квиз и задачи открыты.")
 
-    # ── TAB 2 — SUMMARY + DIAGRAM ────────────────────────────────
+    # ── TAB 2 — SUMMARY + DIAGRAM ────────────────────────────────────
     with tab_summary:
         if not st.session_state.video_confirmed:
             st.info("👆 Сначала посмотри видео на вкладке «Видео» и нажми подтверждение.")
@@ -685,14 +577,14 @@ if st.session_state.summary_data and st.session_state.current_topic:
             st.markdown(summary_md)
             st.markdown("</div>", unsafe_allow_html=True)
 
-            # FIX #2: Mermaid через CDN + zoom/pan
+            # FIX #2: Диаграмма через Kroki.io → st.image()
             mermaid_src = summary.get("mermaid", "").strip()
             if mermaid_src:
                 st.markdown("")
                 st.markdown("#### 🗺️ Структурная диаграмма")
-                render_mermaid(mermaid_src, height=460)
+                render_diagram(mermaid_src)
 
-    # ── TAB 3 — QUIZ ─────────────────────────────────────────────
+    # ── TAB 3 — QUIZ ─────────────────────────────────────────────────
     with tab_quiz:
         if not st.session_state.video_confirmed:
             st.info("👆 Сначала посмотри видео на вкладке «Видео» и нажми подтверждение.")
@@ -704,7 +596,6 @@ if st.session_state.summary_data and st.session_state.current_topic:
                 st.info("Квиз недоступен.")
             else:
                 n = len(quiz)
-                # FIX #5: отображаем реальное число вопросов
                 if 2 <= n <= 4:
                     q_label = f"{n} вопроса"
                 elif n >= 5:
@@ -802,7 +693,7 @@ if st.session_state.summary_data and st.session_state.current_topic:
                         st.session_state.quiz_answers   = {}
                         st.rerun()
 
-    # ── TAB 4 — PRACTICE ─────────────────────────────────────────
+    # ── TAB 4 — PRACTICE ─────────────────────────────────────────────
     with tab_practice:
         if not st.session_state.video_confirmed:
             st.info("👆 Сначала посмотри видео на вкладке «Видео» и нажми подтверждение.")
@@ -832,9 +723,9 @@ if st.session_state.summary_data and st.session_state.current_topic:
             if sol:
                 st.markdown("#### 🔬 Разобранный пример")
                 st.markdown(
-                    f'<div class="practice-card" style="border-left-color:#a78bfa">'
-                    f'<div class="practice-num">Условие</div>'
-                    f"</div>",
+                    '<div class="practice-card" style="border-left-color:#a78bfa">'
+                    '<div class="practice-num">Условие</div>'
+                    "</div>",
                     unsafe_allow_html=True,
                 )
                 st.markdown(sol.get("problem", ""))
