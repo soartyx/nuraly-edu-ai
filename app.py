@@ -1,6 +1,6 @@
 """
 EduSearch — AI Lesson Platform
-Визуализация: ИИ ищет реальные иллюстрации на Wikimedia Commons / открытых источниках.
+Визуализация: ИИ ищет реальные иллюстрации через Wikipedia API (lang-aware).
 Возвращает 2-3 прямых URL → отображаем через st.image().
 """
 import json
@@ -127,7 +127,33 @@ def get_openai() -> OpenAI:
     return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 # ══════════════════════════════════════════════════════════════════════
-# YOUTUBE
+# LANGUAGE CONFIG HELPERS
+# ══════════════════════════════════════════════════════════════════════
+
+# Маппинг языка интерфейса → параметры YouTube и Wikipedia
+_LANG_CONFIG = {
+    "RUSSIAN": {
+        "yt_query_suffix": "урок на русском",
+        "yt_relevance_language": "ru",
+        "yt_region_code": "RU",
+        "wiki_lang": "ru",
+        "label": "🇷🇺 Русский",
+    },
+    "ENGLISH": {
+        "yt_query_suffix": "tutorial lesson",
+        "yt_relevance_language": "en",
+        "yt_region_code": "US",
+        "wiki_lang": "en",
+        "label": "🇬🇧 English",
+    },
+}
+
+def get_lang_config(ui_language: str) -> dict:
+    """Возвращает конфиг для выбранного языка интерфейса."""
+    return _LANG_CONFIG.get(ui_language.upper(), _LANG_CONFIG["RUSSIAN"])
+
+# ══════════════════════════════════════════════════════════════════════
+# YOUTUBE  (динамический язык)
 # ══════════════════════════════════════════════════════════════════════
 def _yt_keys() -> list[str]:
     keys = st.secrets.get("YT_KEYS", [])
@@ -137,9 +163,13 @@ def _yt_keys() -> list[str]:
     return keys
 
 @st.cache_data(show_spinner=False)
-def search_youtube(topic: str) -> str | None:
-    """Ищет русскоязычные обучающие видео."""
-    query = f"{topic} урок на русском"
+def search_youtube(topic: str, ui_language: str = "RUSSIAN") -> str | None:
+    """
+    Ищет обучающее видео на YouTube.
+    Язык поиска определяется параметром ui_language ('RUSSIAN' | 'ENGLISH').
+    """
+    cfg = get_lang_config(ui_language)
+    query = f"{topic} {cfg['yt_query_suffix']}"
     keys = _yt_keys()
     if not keys:
         st.warning("YouTube API ключ не настроен.")
@@ -153,8 +183,8 @@ def search_youtube(topic: str) -> str | None:
                 type="video",
                 maxResults=5,
                 videoDuration="medium",
-                relevanceLanguage="ru",
-                regionCode="KZ",
+                relevanceLanguage=cfg["yt_relevance_language"],
+                regionCode=cfg["yt_region_code"],
                 safeSearch="strict",
             ).execute()
             items = resp.get("items", [])
@@ -172,88 +202,137 @@ def search_youtube(topic: str) -> str | None:
     return None
 
 # ══════════════════════════════════════════════════════════════════════
-# WIKIMEDIA COMMONS IMAGE SEARCH
+# WIKIPEDIA IMAGE SEARCH  (lang-aware, без Mermaid/Kroki)
 # ══════════════════════════════════════════════════════════════════════
-@st.cache_data(show_spinner=False)
-def get_image_search_queries(topic: str, language: str) -> list[str]:
-    """
-    ИИ генерирует 3 поисковых запроса на английском для поиска
-    образовательных иллюстраций на Wikimedia Commons.
-    """
-    oai = get_openai()
-    resp = oai.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a search assistant. Given an educational topic, "
-                    "return ONLY valid JSON with 3 short English search queries "
-                    "to find real educational diagrams, schemes, or illustrations "
-                    "on Wikimedia Commons.\n"
-                    "Rules:\n"
-                    "- Queries must be in English (Wikimedia Commons is indexed in English)\n"
-                    "- Each query should be 2-5 words, specific and academic\n"
-                    "- Target: diagrams, schemes, charts, illustrations (not photos)\n"
-                    'JSON schema: {"queries": ["query1", "query2", "query3"]}\n'
-                    "No preamble, no markdown, ONLY JSON."
-                ),
-            },
-            {"role": "user", "content": f"Educational topic: {topic}"},
-        ],
-        temperature=0.3,
-        max_tokens=150,
-        response_format={"type": "json_object"},
-    )
-    data = json.loads(resp.choices[0].message.content)
-    return data.get("queries", [topic])
 
-def _wikimedia_search(query: str) -> str | None:
+def _wikipedia_images(topic: str, wiki_lang: str, max_images: int = 3) -> list[dict]:
     """
-    Ищет одно изображение на Wikimedia Commons по запросу.
-    Возвращает прямой URL к файлу или None.
+    Ищет реальные иллюстрации через Wikipedia API нужной языковой версии.
+    Алгоритм:
+      1. Поиск статьи по теме в нужной Wikipedia.
+      2. Получение списка изображений из статьи.
+      3. Фильтрация по типу (PNG/JPEG/SVG) и исключение служебных файлов.
+      4. Получение прямых URL через imageinfo API.
+    Возвращает список {"url": ..., "caption": ...}.
     """
+    headers = {"User-Agent": "EduSearch/1.0 (educational app)"}
+    base = f"https://{wiki_lang}.wikipedia.org/w/api.php"
+
+    # ── Шаг 1: найти заголовок статьи ──────────────────────────────
     try:
-        search_url = "https://commons.wikimedia.org/w/api.php"
-        params = {
-            "action": "query",
-            "generator": "search",
-            "gsrnamespace": 6,
-            "gsrsearch": query,
-            "gsrlimit": 5,
-            "prop": "imageinfo",
-            "iiprop": "url|mime",
-            "format": "json",
-        }
-        headers = {"User-Agent": "EduSearch/1.0 (educational app)"}
-        r = requests.get(search_url, params=params, headers=headers, timeout=8)
+        r = requests.get(
+            base,
+            params={
+                "action": "query",
+                "list": "search",
+                "srsearch": topic,
+                "srlimit": 1,
+                "format": "json",
+            },
+            headers=headers,
+            timeout=8,
+        )
         r.raise_for_status()
-        data = r.json()
-        pages = data.get("query", {}).get("pages", {})
-        for page in pages.values():
-            info = page.get("imageinfo", [{}])[0]
-            url = info.get("url", "")
-            mime = info.get("mime", "")
-            if url and mime in ("image/png", "image/jpeg", "image/svg+xml"):
-                return url
+        results = r.json().get("query", {}).get("search", [])
+        if not results:
+            return []
+        page_title = results[0]["title"]
     except Exception:
-        pass
-    return None
+        return []
+
+    # ── Шаг 2: получить список файлов из статьи ────────────────────
+    try:
+        r = requests.get(
+            base,
+            params={
+                "action": "query",
+                "titles": page_title,
+                "prop": "images",
+                "imlimit": 20,
+                "format": "json",
+            },
+            headers=headers,
+            timeout=8,
+        )
+        r.raise_for_status()
+        pages = r.json().get("query", {}).get("pages", {})
+        raw_images = []
+        for page in pages.values():
+            raw_images = page.get("images", [])
+            break
+    except Exception:
+        return []
+
+    # ── Шаг 3: фильтрация служебных файлов ─────────────────────────
+    SKIP_KEYWORDS = (
+        "icon", "logo", "flag", "edit", "wikimedia", "commons",
+        "button", "arrow", "portal", "symbol", "badge",
+    )
+    ALLOWED_EXT = (".png", ".jpg", ".jpeg", ".svg")
+
+    filtered = []
+    for img in raw_images:
+        title_lower = img["title"].lower()
+        if not any(title_lower.endswith(ext) for ext in ALLOWED_EXT):
+            continue
+        if any(kw in title_lower for kw in SKIP_KEYWORDS):
+            continue
+        filtered.append(img["title"])
+        if len(filtered) >= max_images * 2:  # берём с запасом
+            break
+
+    if not filtered:
+        return []
+
+    # ── Шаг 4: получить прямые URL ─────────────────────────────────
+    try:
+        r = requests.get(
+            "https://commons.wikimedia.org/w/api.php",
+            params={
+                "action": "query",
+                "titles": "|".join(filtered[:max_images * 2]),
+                "prop": "imageinfo",
+                "iiprop": "url|mime",
+                "format": "json",
+            },
+            headers=headers,
+            timeout=8,
+        )
+        r.raise_for_status()
+        pages = r.json().get("query", {}).get("pages", {})
+    except Exception:
+        return []
+
+    results = []
+    seen: set[str] = set()
+    for page in pages.values():
+        if len(results) >= max_images:
+            break
+        info = page.get("imageinfo", [{}])[0]
+        url = info.get("url", "")
+        mime = info.get("mime", "")
+        if url and url not in seen and mime in ("image/png", "image/jpeg", "image/svg+xml"):
+            seen.add(url)
+            caption = page.get("title", "").replace("File:", "").replace("Файл:", "")
+            results.append({"url": url, "caption": caption})
+
+    return results
 
 @st.cache_data(show_spinner=False)
-def fetch_topic_images(topic: str, language: str) -> list[dict]:
-    """Возвращает список до 3 словарей {"url": "...", "caption": "..."}."""
-    queries = get_image_search_queries(topic, language)
-    results = []
-    seen_urls: set[str] = set()
-    for query in queries:
-        if len(results) >= 3:
-            break
-        url = _wikimedia_search(query)
-        if url and url not in seen_urls:
-            seen_urls.add(url)
-            results.append({"url": url, "caption": query})
-    return results
+def fetch_topic_images(topic: str, ui_language: str = "RUSSIAN") -> list[dict]:
+    """
+    Возвращает список до 3 словарей {"url": ..., "caption": ...}.
+    Язык Wikipedia определяется параметром ui_language.
+    """
+    cfg = get_lang_config(ui_language)
+    wiki_lang = cfg["wiki_lang"]
+    images = _wikipedia_images(topic, wiki_lang, max_images=3)
+
+    # Запасной вариант: если в нужной Wikipedia не нашли — пробуем английскую
+    if not images and wiki_lang != "en":
+        images = _wikipedia_images(topic, "en", max_images=3)
+
+    return images
 
 def render_topic_images(images: list[dict]) -> None:
     """Отображает найденные иллюстрации через st.image()."""
@@ -465,7 +544,7 @@ with col_input:
 with col_btn:
     go = st.button("Go →", type="primary", use_container_width=True)
 
-opt_col1, opt_col2 = st.columns(2)
+opt_col1, opt_col2, opt_col3 = st.columns(3)
 with opt_col1:
     level = st.selectbox(
         "Уровень сложности",
@@ -474,6 +553,14 @@ with opt_col1:
         key="level_select",
     )
 with opt_col2:
+    ui_language = st.selectbox(
+        "Язык контента",
+        ["RUSSIAN", "ENGLISH"],
+        index=0,
+        format_func=lambda x: _LANG_CONFIG[x]["label"],
+        key="ui_language_select",
+    )
+with opt_col3:
     deep_mode = st.checkbox("🔬 Deep Research", value=False, key="deep_mode")
 
 # ══════════════════════════════════════════════════════════════════════
@@ -481,6 +568,8 @@ with opt_col2:
 # ══════════════════════════════════════════════════════════════════════
 if go and topic_input.strip():
     new_topic = topic_input.strip()
+    selected_ui_lang = st.session_state.get("ui_language_select", "RUSSIAN")
+
     if new_topic != st.session_state.current_topic:
         for _k, _v in DEFAULTS.items():
             st.session_state[_k] = _v
@@ -490,14 +579,21 @@ if go and topic_input.strip():
         lang = detect_language(new_topic)
         st.session_state.detected_language = lang
 
-    with st.spinner("🎬 Ищу видео на русском языке…"):
-        st.session_state.video_url = search_youtube(new_topic)
+    cfg = get_lang_config(selected_ui_lang)
+    spinner_video_msg = (
+        "🎬 Ищу видео на русском языке…"
+        if selected_ui_lang == "RUSSIAN"
+        else "🎬 Searching for English video…"
+    )
+    with st.spinner(spinner_video_msg):
+        st.session_state.video_url = search_youtube(new_topic, selected_ui_lang)
 
     with st.spinner("📝 Составляю конспект…"):
         st.session_state.summary_data = generate_summary(new_topic, lang, level)
 
-    with st.spinner("🖼 Ищу иллюстрации по теме…"):
-        st.session_state.topic_images = fetch_topic_images(new_topic, lang)
+    wiki_lang_label = "русской" if cfg["wiki_lang"] == "ru" else "English"
+    with st.spinner(f"🖼 Ищу иллюстрации в {wiki_lang_label} Википедии…"):
+        st.session_state.topic_images = fetch_topic_images(new_topic, selected_ui_lang)
 
     n_q = st.session_state.summary_data.get("quiz_count_hint", 5)
     with st.spinner(f"🧠 Строю квиз ({n_q} вопросов) и задачи…"):
@@ -516,13 +612,14 @@ if st.session_state.summary_data and st.session_state.current_topic:
     topic = st.session_state.current_topic
     lang = st.session_state.detected_language
     level = st.session_state.get("level_select", "Новичок")
+    selected_ui_lang = st.session_state.get("ui_language_select", "RUSSIAN")
     summary = st.session_state.summary_data
     lesson = st.session_state.lesson_data or {}
     images = st.session_state.topic_images or []
 
-    # FIX: закрытый тег </div>
+    lang_label = _LANG_CONFIG.get(selected_ui_lang, _LANG_CONFIG["RUSSIAN"])["label"]
     st.markdown(
-        f'<div class="topic-pill">📌 {topic} &nbsp;·&nbsp; {lang} &nbsp;·&nbsp; {level}</div>',
+        f'<div class="topic-pill">📌 {topic} &nbsp;·&nbsp; {lang_label} &nbsp;·&nbsp; {level}</div>',
         unsafe_allow_html=True,
     )
 
@@ -536,7 +633,12 @@ if st.session_state.summary_data and st.session_state.current_topic:
         url = st.session_state.video_url
         if url:
             st.video(url)
-            st.caption("🎓 Обучающее видео на русском языке по теме")
+            video_caption = (
+                "🎓 Обучающее видео на русском языке по теме"
+                if selected_ui_lang == "RUSSIAN"
+                else "🎓 Educational video on the topic"
+            )
+            st.caption(video_caption)
         else:
             st.info("Видео не найдено. Попробуй переформулировать тему.")
         st.markdown("")
@@ -581,9 +683,11 @@ if st.session_state.summary_data and st.session_state.current_topic:
             if images:
                 st.markdown("")
                 render_topic_images(images)
+                cfg = get_lang_config(selected_ui_lang)
+                wiki_url = f"https://{cfg['wiki_lang']}.wikipedia.org"
                 st.caption(
-                    "🖼 Иллюстрации из [Wikimedia Commons](https://commons.wikimedia.org/) "
-                    "(открытая лицензия)"
+                    f"🖼 Иллюстрации из [Wikipedia]({wiki_url}) "
+                    f"(через Wikimedia Commons, открытая лицензия)"
                 )
 
     # ── TAB 3 — QUIZ ─────────────────────────────────────────────────
@@ -733,7 +837,6 @@ if st.session_state.summary_data and st.session_state.current_topic:
 
                 with st.expander("💡 Показать решение", expanded=False):
                     for i, step in enumerate(sol.get("steps", [])):
-                        # FIX: шаг рендерится через st.markdown, а не в пустом <div>
                         st.markdown(
                             f'<div class="solution-step">'
                             f'<div class="step-num">{i + 1}</div>'
